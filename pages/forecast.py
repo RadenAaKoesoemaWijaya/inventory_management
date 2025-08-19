@@ -35,7 +35,7 @@ def app():
                 sys.path.append(scripts_dir)
                 import forecast_inventory
                 st.success("Prediksi berhasil dijalankan!")
-                st.experimental_rerun()
+                st.rerun()
             except Exception as e:
                 st.error(f"Error saat menjalankan prediksi: {e}")
         
