@@ -53,19 +53,18 @@ def receive_items():
         # Quantity
         quantity = st.number_input("Jumlah", min_value=1, value=1)
         
-        # Source department (usually Procurement)
         conn = get_db_connection()
         departments = pd.read_sql_query("SELECT id, name FROM departments ORDER BY name", conn)
         conn.close()
         
         dept_options = [f"{row['id']} - {row['name']}" for _, row in departments.iterrows()]
         from_dept = st.selectbox("Dari Departemen", dept_options, 
-                                index=next((i for i, d in enumerate(dept_options) if "Procurement" in d or "Pengadaan" in d), 0))
+                                index=next((i for i, d in enumerate(dept_options) if "Pengadaan" in d), 0))
         from_dept_id = int(from_dept.split(" - ")[0])
         
         # Target department (usually Warehouse)
         to_dept = st.selectbox("Ke Departemen", dept_options,
-                              index=next((i for i, d in enumerate(dept_options) if "Warehouse" in d or "Gudang" in d), 0))
+                              index=next((i for i, d in enumerate(dept_options) if "Gudang" in d), 0))
         to_dept_id = int(to_dept.split(" - ")[0])
         
         # Notes
@@ -156,7 +155,7 @@ def distribute_items():
             
             # Source department (usually Warehouse)
             from_dept = st.selectbox("Dari Departemen", dept_options,
-                                    index=next((i for i, d in enumerate(dept_options) if "Warehouse" in d or "Gudang" in d), 0))
+                                    index=next((i for i, d in enumerate(dept_options) if "Gudang" in d), 0))
             from_dept_id = int(from_dept.split(" - ")[0])
             
             # Target department
