@@ -97,8 +97,10 @@ def init_db():
             ('IGD', 'Instalasi Gawat Darurat untuk penanganan kasus darurat'),
             ('Laboratorium', 'Departemen untuk pemeriksaan laboratorium'),
             ('Radiologi', 'Departemen untuk pemeriksaan radiologi'),
-            ('Kamar Operasi', 'Departemen untuk tindakan operasi'),
-            ('Administrasi', 'Departemen yang mengelola administrasi rumah sakit')
+            ('Ruang Tindakan', 'Departemen untuk tindakan medis'),
+            ('Administrasi', 'Departemen yang mengelola administrasi rumah sakit'),
+            ('Pengadaan', 'Departemen yang mengelola pengadaan barang dan inventori'),
+            ('Gudang', 'Departemen penyimpanan barang dan inventori')
         ]
         
         cursor.executemany('INSERT INTO departments (name, description) VALUES (?, ?)', departments)
