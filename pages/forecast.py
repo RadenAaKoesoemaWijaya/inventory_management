@@ -29,7 +29,10 @@ def app():
                 # Import and run the forecast script
                 import sys
                 import os
-                sys.path.append(os.path.abspath('c:/Users/koeso/OneDrive/Desktop/Inventory Management/scripts'))
+                # Add scripts directory to path using relative path from current file
+                current_dir = os.path.dirname(os.path.abspath(__file__))
+                scripts_dir = os.path.join(current_dir, '..', 'scripts')
+                sys.path.append(scripts_dir)
                 import forecast_inventory
                 st.success("Prediksi berhasil dijalankan!")
                 st.experimental_rerun()
@@ -48,8 +51,7 @@ def app():
     ).iloc[0]['latest_date']
     
     st.info(f"Data prediksi terakhir: {latest_forecast}")
-    
-    # Get forecast data
+
     forecast_data = pd.read_sql_query(
         """
         SELECT 
@@ -66,6 +68,19 @@ def app():
     )
     
     conn.close()
+    
+    # Check if forecast data is empty
+    if forecast_data.empty:
+        st.warning("Belum ada data prediksi. Silakan jalankan prediksi terlebih dahulu.")
+        
+        # Show items table to verify data exists
+        items_data = pd.read_sql_query("SELECT id, name, category, current_stock, min_stock, unit FROM items", sqlite3.connect('inventory.db'))
+        if not items_data.empty:
+            st.info("Data item tersedia. Klik tombol 'Jalankan Prediksi' untuk membuat data prediksi.")
+        else:
+            st.error("Tidak ada data item. Silakan tambahkan data item terlebih dahulu.")
+        
+        return
     
     # Display summary
     st.subheader("Ringkasan Prediksi")
