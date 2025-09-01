@@ -51,7 +51,7 @@ def sidebar_nav():
         if st.sidebar.button("Logout", use_container_width=True):
             from utils.auth import logout_user
             logout_user()
-            st.rerun()
+            st.experimental_rerun()
             
         return selected_page
     
@@ -79,7 +79,7 @@ def login_page():
                 # In the login_page function
                 if login_user(username, password):
                     st.success("Login berhasil!")
-                    st.rerun()  # Changed from st.experimental_rerun()
+                    st.experimental_rerun()  # Fixed: using experimental_rerun instead of rerun
                 else:
                     st.error("Username atau password salah!")
     
@@ -324,7 +324,7 @@ def profile_page():
                     st.session_state['user']['department'] = new_department
                     
                     st.success("Profil berhasil diperbarui!")
-                    st.rerun()
+                    st.experimental_rerun()
                 except Exception as e:
                     st.error(f"Gagal update profil: {str(e)}")
             else:
