@@ -35,7 +35,7 @@ def app():
                 sys.path.append(scripts_dir)
                 import forecast_inventory
                 st.success("Prediksi berhasil dijalankan!")
-                st.rerun()
+                st.experimental_rerun()
             except Exception as e:
                 st.error(f"Error saat menjalankan prediksi: {e}")
         
@@ -243,6 +243,8 @@ def app():
             color='category'
         )
         st.plotly_chart(fig2)
+        st.success("Data berhasil diperbarui!")
+        st.experimental_rerun()
 
 if __name__ == "__main__":
     app()
