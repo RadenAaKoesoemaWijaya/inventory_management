@@ -277,10 +277,10 @@ def app():
                    'reorder_date', 'confidence_level_str']
     
     # Only include columns that exist
-    available_cols = [col for col in display_cols if col in forecast_display.columns]
-    display_df = forecast_display[available_cols].copy()
+    available_cols = [col for col in display_cols if col in display_df.columns]
+    display_final = display_df[available_cols].copy()
     
-    styled_display = display_df.style.applymap(
+    styled_display = display_final.style.applymap(
         color_confidence, 
         subset=['confidence_level_str']
     )
