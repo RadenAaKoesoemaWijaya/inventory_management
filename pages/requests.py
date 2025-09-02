@@ -92,7 +92,7 @@ def create_request():
                     )
                     conn.commit()
                     st.success("Permintaan berhasil dibuat!")
-                    st.experimental_rerun()
+                    st.rerun()
                 except sqlite3.Error as e:
                     st.error(f"Error: {e}")
                 finally:
@@ -223,7 +223,7 @@ def process_request(request_id, status):
             st.success(f"Permintaan #{request_id} telah ditolak.")
         
         # Refresh page
-        st.experimental_rerun()
+        st.rerun()
         
     except sqlite3.Error as e:
         cursor.execute("ROLLBACK")
