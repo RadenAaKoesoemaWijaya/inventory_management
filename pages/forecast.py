@@ -174,12 +174,9 @@ def app():
     # Handle NaN values and infinities
     numeric_columns = ['annual_consumption_rate', 'projected_annual_consumption', 'confidence_level']
     for col in numeric_columns:
-        if col in forecast_display.columns:
-            forecast_display[col] = pd.to_numeric(forecast_display[col], errors='coerce')
-            # Replace infinities with NaN
-            forecast_display[col] = forecast_display[col].replace([np.inf, -np.inf], np.nan)
-            # Fill NaN with 0
-            forecast_display[col] = forecast_display[col].fillna(0)
+        forecast_display[col] = pd.to_numeric(forecast_display[col], errors='coerce')
+        forecast_display[col] = forecast_display[col].replace([np.inf, -np.inf], np.nan)
+        forecast_display[col] = forecast_display[col].fillna(0)
     
     # Format dates
     if 'reorder_date' in forecast_display.columns:
