@@ -58,7 +58,8 @@ def app():
             f.id, f.item_id, i.name as item_name, i.category, i.current_stock, 
             i.min_stock, i.unit, f.annual_consumption_rate, 
             f.projected_annual_consumption, f.monthly_projected_consumption,
-            f.months_to_min_stock, f.reorder_date, f.recommended_order_qty
+            f.months_to_min_stock, f.reorder_date, f.recommended_order_qty,
+            f.confidence_level, f.forecast_method
         FROM inventory_forecast f
         JOIN items i ON f.item_id = i.id
         WHERE f.forecast_date = (SELECT MAX(forecast_date) FROM inventory_forecast)
@@ -85,7 +86,7 @@ def app():
     # Display summary
     st.subheader("Ringkasan Prediksi")
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col4 = st.columns(4)
     
     with col1:
         st.metric("Total Item", len(forecast_data))
@@ -95,8 +96,12 @@ def app():
         st.metric("Perlu Dipesan (3 Bulan)", items_to_reorder)
     
     with col3:
-        avg_consumption = forecast_data['annual_consumption_rate'].mean() * 100
-        st.metric("Rata-rata Konsumsi Tahunan", f"{avg_consumption:.1f}%")
+        avg_confidence = forecast_data['confidence_level'].mean() * 100
+        st.metric("Rata-rata Kepercayaan", f"{avg_confidence:.0f}%")
+    
+    with col4:
+        high_confidence = len(forecast_data[forecast_data['confidence_level'] >= 0.7])
+        st.metric("Prediksi Tinggi", f"{high_confidence}")
     
     # Display items that need to be reordered soon
     st.subheader("Item yang Perlu Segera Dipesan")
@@ -130,12 +135,36 @@ def app():
     # Display all forecast data
     st.subheader("Prediksi Kebutuhan Semua Item")
     
-    # Format the data for display
+    # Format display data
     forecast_display = forecast_data.copy()
-    forecast_display['annual_consumption_rate'] = (forecast_display['annual_consumption_rate'] * 100).round(1).astype(str) + '%'
+    forecast_display['reorder_date'] = pd.to_datetime(forecast_display['reorder_date']).dt.strftime('%d/%m/%Y')
+    forecast_display['annual_consumption_rate'] = (forecast_display['annual_consumption_rate'] * 100).round(1)
+    forecast_display['projected_annual_consumption'] = (forecast_display['projected_annual_consumption'] * 100).round(1)
+    forecast_display['confidence_level'] = (forecast_display['confidence_level'] * 100).round(1).astype(str) + '%'
+    
+    # Color coding for confidence levels
+    def color_confidence(val):
+        if isinstance(val, str) and val.endswith('%'):
+            confidence = float(val.replace('%', ''))
+            if confidence >= 80:
+                return 'background-color: #90EE90'  # Green
+            elif confidence >= 60:
+                return 'background-color: #FFFFE0'  # Yellow
+            elif confidence >= 40:
+                return 'background-color: #FFE4B5'  # Orange
+            else:
+                return 'background-color: #FFB6C1'  # Red
+        return ''
+    
+    styled_display = forecast_display.style.applymap(
+        color_confidence, 
+        subset=['confidence_level']
+    )
+    
+    st.dataframe(styled_display, use_container_width=True)
     
     # Add tabs for different views
-    tab1, tab2, tab3 = st.tabs(["Tabel Data", "Grafik Konsumsi", "Grafik Waktu Pemesanan"])
+    tab1, tab2, tab3, tab4 = st.tabs(["Tabel Data", "Grafik Konsumsi", "Grafik Waktu Pemesanan", "Analisis Kualitas"])
     
     with tab1:
         st.dataframe(forecast_display)
@@ -156,11 +185,9 @@ def app():
         with col2:
             if st.button("Ekspor ke Excel"):
                 # Create Excel file in memory
-                    # Create Excel binary data
-                    output = io.BytesIO()
-                    with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                        df.to_excel(writer, sheet_name='Sheet1', index=False)
-                    output.seek(0)
+                output = io.BytesIO()
+                with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                    forecast_display.to_excel(writer, sheet_name='Prediksi', index=False)
                     
                     # Get the workbook and add formats
                     workbook = writer.book
@@ -182,15 +209,14 @@ def app():
                     # Adjust columns width
                     worksheet.set_column(0, len(forecast_display.columns) - 1, 15)
                 
-
-                    excel_data = output.getvalue()
+                excel_data = output.getvalue()
                 
-                    st.download_button(
-                        label="Download Excel",
-                        data=excel_data,
-                        file_name=f"inventory_forecast_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
-                        mime="application/vnd.ms-excel"
-                    )
+                st.download_button(
+                    label="Download Excel",
+                    data=excel_data,
+                    file_name=f"inventory_forecast_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+                    mime="application/vnd.ms-excel"
+                )
     
     with tab2:
         # Sort by projected consumption
@@ -243,6 +269,52 @@ def app():
             color='category'
         )
         st.plotly_chart(fig2)
+    
+    with tab4:
+        st.subheader("Analisis Kualitas Prediksi")
+        
+        # Confidence level distribution
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            confidence_dist = forecast_data['confidence_level'].value_counts(bins=5)
+            fig_conf = px.bar(
+                x=['Rendah', 'Cukup', 'Sedang', 'Tinggi', 'Sangat Tinggi'],
+                y=confidence_dist.values,
+                title="Distribusi Tingkat Kepercayaan Prediksi",
+                labels={'x': 'Tingkat Kepercayaan', 'y': 'Jumlah Item'}
+            )
+            st.plotly_chart(fig_conf)
+        
+        with col2:
+            method_counts = forecast_data['forecast_method'].value_counts()
+            fig_method = px.pie(
+                values=method_counts.values,
+                names=method_counts.index,
+                title="Metode Prediksi yang Digunakan"
+            )
+            st.plotly_chart(fig_method)
+        
+        # Show items with low confidence
+        low_confidence = forecast_data[forecast_data['confidence_level'] < 0.5]
+        if not low_confidence.empty:
+            st.warning("⚠️ Item dengan Prediksi Rendah (< 50% kepercayaan)")
+            low_conf_display = low_confidence[['item_name', 'category', 'current_stock', 
+                                            'months_to_min_stock', 'confidence_level', 
+                                            'forecast_method']].copy()
+            low_conf_display['confidence_level'] = (low_conf_display['confidence_level'] * 100).round(1).astype(str) + '%'
+            st.dataframe(low_conf_display)
+        
+        # Show high confidence predictions
+        high_confidence = forecast_data[forecast_data['confidence_level'] >= 0.8]
+        if not high_confidence.empty:
+            st.success("✅ Item dengan Prediksi Tinggi (≥ 80% kepercayaan)")
+            high_conf_display = high_confidence[['item_name', 'category', 'current_stock', 
+                                               'months_to_min_stock', 'recommended_order_qty',
+                                               'confidence_level']].copy()
+            high_conf_display['confidence_level'] = (high_conf_display['confidence_level'] * 100).round(1).astype(str) + '%'
+            st.dataframe(high_conf_display)
+        
         st.success("Data berhasil diperbarui!")
         st.experimental_rerun()
 
