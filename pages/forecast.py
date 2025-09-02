@@ -50,7 +50,33 @@ def app():
         conn
     ).iloc[0]['latest_date']
     
-    st.info(f"Data prediksi terakhir: {latest_forecast}")
+    # Create columns for forecast info and refresh button
+    col_info, col_refresh = st.columns([3, 1])
+    
+    with col_info:
+        st.info(f"Data prediksi terakhir: {latest_forecast}")
+    
+    with col_refresh:
+        if st.button("🔄 Jalankan Prediksi Baru", type="primary"):
+            with st.spinner("Menjalankan prediksi baru..."):
+                try:
+                    # Import and run the forecast script
+                    import sys
+                    import os
+                    # Add scripts directory to path using relative path from current file
+                    current_dir = os.path.dirname(os.path.abspath(__file__))
+                    scripts_dir = os.path.join(current_dir, '..', 'scripts')
+                    sys.path.append(scripts_dir)
+                    
+                    # Run the forecast
+                    import forecast_inventory
+                    forecast_inventory.run_forecast()
+                    
+                    st.success("Prediksi baru berhasil dijalankan!")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Error saat menjalankan prediksi: {e}")
+                    st.info("Silakan cek koneksi database dan pastikan data transaksi tersedia.")
 
     forecast_data = pd.read_sql_query(
         """
