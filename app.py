@@ -7,7 +7,7 @@ import os
 
 # Set page configuration
 st.set_page_config(
-    page_title="Sistem Manajemen Inventaris Rumah Sakit",
+    page_title="KALKULIS",
     page_icon="🏥",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -20,7 +20,7 @@ if 'authenticated' not in st.session_state:
 # Sidebar navigation
 # Updated sidebar navigation
 def sidebar_nav():
-    st.sidebar.title("Navigasi SIMASYANTO")
+    st.sidebar.title("Navigasi KALKULIS")
     
     if st.session_state.get('authenticated', False):
         user = st.session_state['user']
@@ -51,7 +51,7 @@ def sidebar_nav():
         if st.sidebar.button("Logout", use_container_width=True):
             from utils.auth import logout_user
             logout_user()
-            st.experimental_rerun()
+            st.rerun()
             
         return selected_page
     
@@ -59,7 +59,7 @@ def sidebar_nav():
 
 # Login page
 def login_page():
-    st.title("Sistem Manajemen Aset & Layanan Pengadaan Terkontrol (SIMASYANTO)")
+    st.title("Kalkulasi Kebutuhan Logistik (KALKULIS)")
     
     # Create tabs for login and registration
     login_tab, register_tab, info_tab = st.tabs(["Login", "Daftar Baru", "Tentang Aplikasi"])
@@ -79,7 +79,7 @@ def login_page():
                 # In the login_page function
                 if login_user(username, password):
                     st.success("Login berhasil!")
-                    st.experimental_rerun()  # Fixed: using experimental_rerun instead of rerun
+                    st.rerun()  # Fixed: using experimental_rerun instead of rerun
                 else:
                     st.error("Username atau password salah!")
     
@@ -129,12 +129,10 @@ def login_page():
                         st.error(f"Pendaftaran gagal: {message}")
     
     with info_tab:
-        st.subheader("Tentang SIMASYANTO")
+        st.subheader("Tentang KALKULIS")
         
         st.markdown("""
-        ### Apa itu SIMASYANTO?
-        **SIMASYANTO** (Sistem Manajemen Aset & Layanan Pengadaan Terkontrol) adalah aplikasi manajemen inventaris fasyankes yang dirancang untuk mengelola aset medis dan non-medis secara efisien.
-        
+                
         ### Fungsi Utama:
         - **Manajemen Stok**: Monitoring stok barang medis dan non-medis secara real-time
         - **Pengadaan**: Mengelola permintaan dan pengadaan barang
@@ -166,7 +164,7 @@ def login_page():
 
 # Dashboard page
 def dashboard_page():
-    st.title("Dashboard SIMASYANTO")
+    st.title("Dashboard KALKULIS")
     
     # Get stock status
     stock_status = get_stock_status()
@@ -324,7 +322,7 @@ def profile_page():
                     st.session_state['user']['department'] = new_department
                     
                     st.success("Profil berhasil diperbarui!")
-                    st.experimental_rerun()
+                    st.rerun()
                 except Exception as e:
                     st.error(f"Gagal update profil: {str(e)}")
             else:
