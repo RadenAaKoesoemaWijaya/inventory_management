@@ -1,8 +1,9 @@
 import streamlit as st
 import pandas as pd
 from utils.auth import require_auth, require_role
-from utils.database import get_db_connection
-import sqlite3
+from utils.database import MongoDBConnection
+from datetime import datetime
+from bson import ObjectId
 
 def app():
     require_auth()
@@ -30,19 +31,16 @@ def add_inventory_item():
         description = st.text_area("Deskripsi")
         
         # Get categories from database for dropdown
-        conn = get_db_connection()
-        categories = pd.read_sql_query("SELECT DISTINCT category FROM items ORDER BY category", conn)
-        conn.close()
-        
-        category_list = categories['category'].tolist() if not categories.empty else []
+        db = MongoDBConnection.get_db()
+        categories = db.items.distinct("category")
         
         col1, col2 = st.columns(2)
         
         with col1:
             category_option = st.radio("Kategori", ["Pilih dari daftar", "Tambah baru"])
             
-            if category_option == "Pilih dari daftar" and category_list:
-                category = st.selectbox("Pilih Kategori", category_list)
+            if category_option == "Pilih dari daftar" and categories:
+                category = st.selectbox("Pilih Kategori", categories)
             else:
                 category = st.text_input("Masukkan Kategori Baru")
         with col2:
@@ -56,36 +54,43 @@ def add_inventory_item():
             if not name or not category or not unit:
                 st.error("Nama, kategori, dan satuan harus diisi!")
             else:
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                
                 try:
-                    cursor.execute(
-                        """
-                        INSERT INTO items (name, description, category, unit, min_stock, current_stock)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        (name, description, category, unit, min_stock, current_stock)
-                    )
-                    conn.commit()
+                    db = MongoDBConnection.get_db()
+                    
+                    # Insert new item
+                    item_data = {
+                        "name": name,
+                        "description": description,
+                        "category": category,
+                        "unit": unit,
+                        "min_stock": min_stock,
+                        "current_stock": current_stock,
+                        "created_at": datetime.now(),
+                        "updated_at": datetime.now()
+                    }
+                    
+                    result = db.items.insert_one(item_data)
+                    item_id = result.inserted_id
+                    
                     st.success("Item berhasil ditambahkan!")
                     
                     # Add initial stock transaction if current_stock > 0
                     if current_stock > 0:
-                        item_id = cursor.lastrowid
-                        cursor.execute(
-                            """
-                            INSERT INTO inventory_transactions 
-                            (item_id, transaction_type, quantity, to_department_id, created_by, notes)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                            """,
-                            (item_id, 'receive', current_stock, 1, st.session_state['user']['id'], 'Stok awal')
-                        )
-                        conn.commit()
-                except sqlite3.Error as e:
+                        transaction_data = {
+                            "item_id": item_id,
+                            "transaction_type": "receive",
+                            "quantity": current_stock,
+                            "from_department_id": None,
+                            "to_department_id": 1,
+                            "created_by": ObjectId(st.session_state['user']['id']),
+                            "notes": "Stok awal",
+                            "created_at": datetime.now()
+                        }
+                        db.inventory_transactions.insert_one(transaction_data)
+                        st.success("Transaksi stok awal berhasil ditambahkan!")
+                        
+                except Exception as e:
                     st.error(f"Error: {e}")
-                finally:
-                    conn.close()
 
 def display_inventory():
     st.subheader("Daftar Inventaris")
@@ -95,13 +100,12 @@ def display_inventory():
     
     with col1:
         # Get categories from database
-        conn = get_db_connection()
-        categories = pd.read_sql_query("SELECT DISTINCT category FROM items ORDER BY category", conn)
-        conn.close()
+        db = MongoDBConnection.get_db()
+        categories = db.items.distinct("category")
         
         category_filter = st.selectbox(
             "Filter berdasarkan Kategori",
-            ["Semua"] + categories['category'].tolist()
+            ["Semua"] + categories
         )
     
     with col2:
@@ -114,156 +118,145 @@ def display_inventory():
         search_term = st.text_input("Cari Item", "")
     
     # Get inventory data
-    conn = get_db_connection()
-    query = "SELECT * FROM items"
-    params = []
+    db = MongoDBConnection.get_db()
+    query = {}
     
     # Apply filters
-    conditions = []
-    
     if category_filter != "Semua":
-        conditions.append("category = ?")
-        params.append(category_filter)
+        query["category"] = category_filter
     
     if stock_filter == "Stok Rendah":
-        conditions.append("current_stock <= min_stock AND current_stock > 0")
+        query["$expr"] = {"$and": [{"$lte": ["$current_stock", "$min_stock"]}, {"$gt": ["$current_stock", 0]}]}
     elif stock_filter == "Stok Habis":
-        conditions.append("current_stock = 0")
+        query["current_stock"] = 0
     elif stock_filter == "Stok Sehat":
-        conditions.append("current_stock > min_stock")
+        query["$expr"] = {"$gt": ["$current_stock", "$min_stock"]}
     
     if search_term:
-        conditions.append("(name LIKE ? OR description LIKE ?)")
-        params.extend([f"%{search_term}%", f"%{search_term}%"])
+        query["$or"] = [
+            {"name": {"$regex": search_term, "$options": "i"}},
+            {"description": {"$regex": search_term, "$options": "i"}}
+        ]
     
-    if conditions:
-        query += " WHERE " + " AND ".join(conditions)
+    # Get items from database
+    items = list(db.items.find(query).sort([("category", 1), ("name", 1)]))
     
-    query += " ORDER BY category, name"
-    
-    inventory = pd.read_sql_query(query, conn, params=params)
-    conn.close()
-    
-    if not inventory.empty:
-        # Add edit buttons and format the dataframe
-        inventory['Aksi'] = None
+    if items:
+        # Convert to DataFrame for display
+        inventory_df = pd.DataFrame(items)
         
-        # Define columns to display
-        columns_to_display = ['id', 'name', 'category', 'unit', 'current_stock', 'min_stock']
-        if 'description' in inventory.columns:
-            columns_to_display.append('description')
+        # Select columns to display
+        display_columns = ['_id', 'name', 'category', 'unit', 'current_stock', 'min_stock']
+        if 'description' in inventory_df.columns:
+            display_columns.append('description')
         
         # Display the dataframe
-        st.dataframe(inventory[columns_to_display])
+        st.dataframe(inventory_df[display_columns])
         
         # Item details and edit
         st.subheader("Detail Item")
-        item_id = st.number_input("Pilih ID Item untuk diedit", min_value=1, step=1)
+        
+        # Create a selectbox for item selection instead of number input
+        item_names = [f"{item['name']} ({item['category']})" for item in items]
+        selected_item_index = st.selectbox("Pilih Item untuk diedit", range(len(items)), format_func=lambda x: item_names[x])
         
         if st.button("Tampilkan Detail"):
-            conn = get_db_connection()
-            item = pd.read_sql_query("SELECT * FROM items WHERE id = ?", conn, params=(item_id,))
-            conn.close()
+            selected_item = items[selected_item_index]
             
-            if not item.empty:
-                item = item.iloc[0]
+            with st.form("edit_item_form"):
+                st.subheader(f"Edit Item: {selected_item['name']}")
                 
-                with st.form("edit_item_form"):
-                    st.subheader(f"Edit Item: {item['name']}")
-                    
-                    name = st.text_input("Nama Item", item['name'])
-                    description = st.text_area("Deskripsi", item.get('description', ''))
-                    category = st.text_input("Kategori", item['category'])
-                    unit = st.text_input("Satuan", item['unit'])
-                    min_stock = st.number_input("Stok Minimum", value=int(item['min_stock']), min_value=0)
-                    current_stock = st.number_input("Stok Saat Ini", value=int(item['current_stock']), min_value=0)
-                    
-                    submit = st.form_submit_button("Simpan Perubahan")
-                    
-                    if submit:
-                        conn = get_db_connection()
-                        cursor = conn.cursor()
+                name = st.text_input("Nama Item", selected_item['name'])
+                description = st.text_area("Deskripsi", selected_item.get('description', ''))
+                category = st.text_input("Kategori", selected_item['category'])
+                unit = st.text_input("Satuan", selected_item['unit'])
+                min_stock = st.number_input("Stok Minimum", value=int(selected_item['min_stock']), min_value=0)
+                current_stock = st.number_input("Stok Saat Ini", value=int(selected_item['current_stock']), min_value=0)
+                
+                submit = st.form_submit_button("Simpan Perubahan")
+                
+                if submit:
+                    try:
+                        # Update item in database
+                        update_data = {
+                            "name": name,
+                            "description": description,
+                            "category": category,
+                            "unit": unit,
+                            "min_stock": min_stock,
+                            "current_stock": current_stock,
+                            "updated_at": datetime.now()
+                        }
                         
-                        try:
-                            cursor.execute(
-                                """
-                                UPDATE items 
-                                SET name = ?, description = ?, category = ?, unit = ?, 
-                                    min_stock = ?, current_stock = ?, updated_at = CURRENT_TIMESTAMP
-                                WHERE id = ?
-                                """,
-                                (name, description, category, unit, min_stock, current_stock, item_id)
-                            )
-                            conn.commit()
+                        result = db.items.update_one(
+                            {"_id": selected_item['_id']},
+                            {"$set": update_data}
+                        )
+                        
+                        if result.modified_count > 0:
                             st.success("Item berhasil diperbarui!")
-                        except sqlite3.Error as e:
-                            st.error(f"Error: {e}")
-                        finally:
-                            conn.close()
-            else:
-                st.error("Item tidak ditemukan!")
+                            st.rerun()
+                        else:
+                            st.error("Gagal memperbarui item")
+                            
+                    except Exception as e:
+                        st.error(f"Error: {e}")
     else:
         st.info("Tidak ada item yang ditemukan.")
 
 
 def manage_categories():
-        st.subheader("Manajemen Kategori")
+    st.subheader("Manajemen Kategori")
+    
+    # Get categories from database
+    db = MongoDBConnection.get_db()
+    
+    # Get category counts
+    categories = list(db.items.aggregate([
+        {"$group": {"_id": "$category", "item_count": {"$sum": 1}}},
+        {"$sort": {"_id": 1}}
+    ]))
+    
+    if categories:
+        st.write("Kategori yang ada:")
+        for category in categories:
+            col1, col2 = st.columns([3, 1])
+            with col1:
+                st.write(f"**{category['_id']}**")
+            with col2:
+                st.write(f"{category['item_count']} item")
+    else:
+        st.info("Belum ada kategori yang ditambahkan.")
+    
+    # Add new category
+    with st.form("add_category_form"):
+        st.subheader("Tambah Kategori Baru")
+        new_category = st.text_input("Nama Kategori")
+        submit = st.form_submit_button("Tambah Kategori")
         
-        # Get categories from database
-        conn = get_db_connection()
-        categories = pd.read_sql_query(
-            """
-            SELECT category, COUNT(*) as item_count 
-            FROM items 
-            GROUP BY category 
-            ORDER BY category
-            """, 
-            conn
-        )
-        conn.close()
-        
-        if not categories.empty:
-            st.write("Kategori yang ada:")
-            for _, row in categories.iterrows():
-                col1, col2 = st.columns([3, 1])
-                with col1:
-                    st.write(f"**{row['category']}**")
-                with col2:
-                    st.write(f"{row['item_count']} item")
-        else:
-            st.info("Belum ada kategori yang ditambahkan.")
-        
-        # Add new category
-        with st.form("add_category_form"):
-            st.subheader("Tambah Kategori Baru")
-            new_category = st.text_input("Nama Kategori")
-            submit = st.form_submit_button("Tambah Kategori")
+        if submit and new_category:
+            # Check if category already exists
+            existing_category = db.items.find_one({"category": new_category})
             
-            if submit and new_category:
-                # Check if category already exists
-                conn = get_db_connection()
-                cursor = conn.cursor()
-                cursor.execute("SELECT COUNT(*) FROM items WHERE category = ?", (new_category,))
-                count = cursor.fetchone()[0]
-                
-                if count > 0:
-                    st.error(f"Kategori '{new_category}' sudah ada!")
-                else:
-                    # Add a dummy item to create the category
-                    try:
-                        cursor.execute(
-                            """
-                            INSERT INTO items (name, description, category, unit, min_stock, current_stock)
-                            VALUES (?, ?, ?, ?, ?, ?)
-                            """,
-                            (f"Kategori {new_category}", f"Kategori baru: {new_category}", new_category, "pcs", 0, 0)
-                        )
-                        conn.commit()
-                        st.success(f"Kategori '{new_category}' berhasil ditambahkan!")
-                    except sqlite3.Error as e:
-                        st.error(f"Error: {e}")
-                    finally:
-                        conn.close()
+            if existing_category:
+                st.error(f"Kategori '{new_category}' sudah ada!")
+            else:
+                # Add a dummy item to create the category
+                try:
+                    item_data = {
+                        "name": f"Kategori {new_category}",
+                        "description": f"Kategori baru: {new_category}",
+                        "category": new_category,
+                        "unit": "pcs",
+                        "min_stock": 0,
+                        "current_stock": 0,
+                        "created_at": datetime.now(),
+                        "updated_at": datetime.now()
+                    }
+                    db.items.insert_one(item_data)
+                    st.success(f"Kategori '{new_category}' berhasil ditambahkan!")
+                except Exception as e:
+                    st.error(f"Error: {e}")
                         
 if __name__ == "__main__":
     app()

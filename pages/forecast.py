@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 import io
 import numpy as np
 from utils.auth import require_auth
-from utils.database import get_db_connection
+from utils.database import MongoDBConnection
 
 def app():
     require_auth()
@@ -13,15 +13,16 @@ def app():
     st.title("Prediksi Kebutuhan Inventaris")
     
     # Get forecast data
-    conn = get_db_connection()
-    df = pd.read_sql_query("""
-    SELECT id, name, category, current_stock, min_stock, unit 
-    FROM items ORDER BY category, name """, conn)
+    db = MongoDBConnection()
+    items_collection = db.get_collection('items')
+    items_data = list(items_collection.find({}, {'_id': 1, 'name': 1, 'category': 1, 'current_stock': 1, 'min_stock': 1, 'unit': 1}).sort([('category', 1), ('name', 1)]))
+    df = pd.DataFrame(items_data)
     
     # Check if forecast data exists
-    cursor = conn.cursor()
-    cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='inventory_forecast'")
-    if not cursor.fetchone():
+    forecast_collection = db.get_collection('inventory_forecast')
+    forecast_exists = forecast_collection.find_one() is not None
+    
+    if not forecast_exists:
         st.warning("Belum ada data prediksi. Silakan jalankan proses prediksi terlebih dahulu.")
         
         if st.button("Jalankan Prediksi"):
@@ -43,13 +44,9 @@ def app():
         st.stop()
     
     # Get the latest forecast date
-    latest_forecast = pd.read_sql_query(
-        """
-        SELECT MAX(forecast_date) as latest_date
-        FROM inventory_forecast
-        """,
-        conn
-    ).iloc[0]['latest_date']
+    forecast_collection = db.get_collection('inventory_forecast')
+    latest_forecast_doc = forecast_collection.find_one(sort=[('forecast_date', -1)])
+    latest_forecast = latest_forecast_doc['forecast_date'] if latest_forecast_doc else None
     
     # Create columns for forecast info and refresh button
     col_info, col_refresh = st.columns([3, 1])
@@ -79,31 +76,51 @@ def app():
                     st.error(f"Error saat menjalankan prediksi: {e}")
                     st.info("Silakan cek koneksi database dan pastikan data transaksi tersedia.")
 
-    forecast_data = pd.read_sql_query(
-        """
-        SELECT 
-            f.id, f.item_id, i.name as item_name, i.category, i.current_stock, 
-            i.min_stock, i.unit, f.annual_consumption_rate, 
-            f.projected_annual_consumption, f.monthly_projected_consumption,
-            f.months_to_min_stock, f.reorder_date, f.recommended_order_qty,
-            f.confidence_level, f.forecast_method
-        FROM inventory_forecast f
-        JOIN items i ON f.item_id = i.id
-        WHERE f.forecast_date = (SELECT MAX(forecast_date) FROM inventory_forecast)
-        ORDER BY f.months_to_min_stock
-        """,
-        conn
-    )
+    # Get forecast data with MongoDB aggregation
+    forecast_collection = db.get_collection('inventory_forecast')
+    items_collection = db.get_collection('items')
     
-    conn.close()
+    # Get latest forecast date
+    latest_forecast_doc = forecast_collection.find_one(sort=[('forecast_date', -1)])
+    if latest_forecast_doc:
+        latest_forecast_date = latest_forecast_doc['forecast_date']
+        
+        # Get forecast data with item details
+        forecast_data = list(forecast_collection.find({'forecast_date': latest_forecast_date}))
+        
+        # Get item details and merge data
+        forecast_list = []
+        for forecast in forecast_data:
+            item = items_collection.find_one({'_id': forecast['item_id']})
+            if item:
+                forecast_list.append({
+                    'id': str(forecast['_id']),
+                    'item_id': str(forecast['item_id']),
+                    'item_name': item['name'],
+                    'category': item['category'],
+                    'current_stock': item['current_stock'],
+                    'min_stock': item['min_stock'],
+                    'unit': item['unit'],
+                    'annual_consumption_rate': forecast.get('annual_consumption_rate', 0),
+                    'projected_annual_consumption': forecast.get('projected_annual_consumption', 0),
+                    'monthly_projected_consumption': forecast.get('monthly_projected_consumption', 0),
+                    'months_to_min_stock': forecast.get('months_to_min_stock', 0),
+                    'reorder_date': forecast.get('reorder_date'),
+                    'recommended_order_qty': forecast.get('recommended_order_qty', 0),
+                    'confidence_level': forecast.get('confidence_level', 0),
+                    'forecast_method': forecast.get('forecast_method', '')
+                })
+        
+        forecast_data = pd.DataFrame(forecast_list).sort_values('months_to_min_stock')
+    else:
+        forecast_data = pd.DataFrame()
     
     # Check if forecast data is empty
     if forecast_data.empty:
         st.warning("Belum ada data prediksi. Silakan jalankan prediksi terlebih dahulu.")
         
         # Show items table to verify data exists
-        import sqlite3
-        items_data = pd.read_sql_query("SELECT id, name, category, current_stock, min_stock, unit FROM items", sqlite3.connect('inventory.db'))
+        items_data = pd.DataFrame(items_data)
         if not items_data.empty:
             st.info("Data item tersedia. Klik tombol 'Jalankan Prediksi' untuk membuat data prediksi.")
         else:

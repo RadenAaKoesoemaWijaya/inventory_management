@@ -2,8 +2,8 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from utils.auth import require_auth, require_role
-from utils.database import get_db_connection
-import sqlite3
+from utils.database import MongoDBConnection
+from bson.objectid import ObjectId
 
 def app():
     require_auth()
@@ -33,12 +33,10 @@ def create_request():
         return
     
     # Get items from database
-    conn = get_db_connection()
-    items = pd.read_sql_query(
-        "SELECT id, name, category, unit, current_stock FROM items ORDER BY category, name", 
-        conn
-    )
-    conn.close()
+    db = MongoDBConnection.get_instance()
+    items_collection = db.items
+    items_data = list(items_collection.find().sort([("category", 1), ("name", 1)]))
+    items = pd.DataFrame(items_data)
     
     if items.empty:
         st.warning("Tidak ada item dalam database.")
@@ -52,51 +50,56 @@ def create_request():
         item_id = int(selected_item.split(" - ")[0])
         
         # Get item details
-        conn = get_db_connection()
-        item_details = pd.read_sql_query("SELECT * FROM items WHERE id = ?", conn, params=(item_id,))
-        conn.close()
+        db = MongoDBConnection.get_instance()
+        items_collection = db.items
+        item_details = items_collection.find_one({"_id": ObjectId(item_id)})
+        item = pd.Series(item_details) if item_details else pd.Series()
         
-        if not item_details.empty:
-            item = item_details.iloc[0]
-            st.write(f"Stok tersedia: **{item['current_stock']}** {item['unit']}")
-            
-            # Quantity
-            quantity = st.number_input("Jumlah yang Diminta", min_value=1, value=1)
-            
-            # Priority
-            priority = st.selectbox("Prioritas", ["Normal", "Mendesak"])
-            
-            # Notes
-            notes = st.text_area("Catatan", placeholder="Masukkan alasan permintaan atau informasi tambahan")
-            
-            # Submit button
-            submit = st.form_submit_button("Kirim Permintaan")
-            
-            if submit:
-                conn = get_db_connection()
-                cursor = conn.cursor()
+        if item_details:
+                st.write(f"Stok tersedia: **{item['current_stock']}** {item['unit']}")
                 
-                try:
-                    # Get department ID
-                    cursor.execute("SELECT id FROM departments WHERE name = ?", (user_dept,))
-                    dept_id = cursor.fetchone()[0]
+                # Quantity
+                quantity = st.number_input("Jumlah yang Diminta", min_value=1, value=1)
+                
+                # Priority
+                priority = st.selectbox("Prioritas", ["Normal", "Mendesak"])
+                
+                # Notes
+                notes = st.text_area("Catatan", placeholder="Masukkan alasan permintaan atau informasi tambahan")
+                
+                # Submit button
+                submit = st.form_submit_button("Kirim Permintaan")
+                
+                if submit:
+                    db = MongoDBConnection.get_instance()
+                    departments_collection = db.departments
+                    requests_collection = db.item_requests
                     
-                    # Insert request
-                    cursor.execute(
-                        """
-                        INSERT INTO item_requests 
-                        (department_id, item_id, quantity, status, requested_by, notes)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                        """,
-                        (dept_id, item_id, quantity, 'pending', st.session_state['user']['id'], notes)
-                    )
-                    conn.commit()
-                    st.success("Permintaan berhasil dibuat!")
-                    st.rerun()
-                except sqlite3.Error as e:
-                    st.error(f"Error: {e}")
-                finally:
-                    conn.close()
+                    try:
+                        # Get department ID
+                        dept_doc = departments_collection.find_one({"name": user_dept})
+                        if dept_doc:
+                            dept_id = dept_doc["_id"]
+                            
+                            # Insert request
+                            request_data = {
+                                "department_id": dept_id,
+                                "item_id": ObjectId(item_id),
+                                "quantity": quantity,
+                                "status": "pending",
+                                "requested_by": ObjectId(st.session_state['user']['id']),
+                                "notes": notes,
+                                "request_date": datetime.now(),
+                                "priority": priority.lower()
+                            }
+                            
+                            requests_collection.insert_one(request_data)
+                            st.success("Permintaan berhasil dibuat!")
+                            st.rerun()
+                        else:
+                            st.error("Departemen tidak ditemukan")
+                    except Exception as e:
+                        st.error(f"Error: {e}")
 
 def manage_requests():
     st.subheader("Daftar Permintaan")
@@ -107,22 +110,53 @@ def manage_requests():
         return
     
     # Get pending requests
-    conn = get_db_connection()
-    pending_requests = pd.read_sql_query(
-        """
-        SELECT r.id, r.request_date, d.name as department, i.name as item_name, 
-               i.category, r.quantity, i.unit, u.full_name as requested_by,
-               r.notes, i.current_stock
-        FROM item_requests r
-        JOIN departments d ON r.department_id = d.id
-        JOIN items i ON r.item_id = i.id
-        JOIN users u ON r.requested_by = u.id
-        WHERE r.status = 'pending'
-        ORDER BY r.request_date DESC
-        """,
-        conn
-    )
-    conn.close()
+    db = MongoDBConnection.get_instance()
+    requests_collection = db.item_requests
+    items_collection = db.items
+    departments_collection = db.departments
+    users_collection = db.users
+    
+    # Aggregate data for pending requests
+    pipeline = [
+        {"$match": {"status": "pending"}},
+        {"$lookup": {
+            "from": "departments",
+            "localField": "department_id",
+            "foreignField": "_id",
+            "as": "department"
+        }},
+        {"$lookup": {
+            "from": "items",
+            "localField": "item_id",
+            "foreignField": "_id",
+            "as": "item"
+        }},
+        {"$lookup": {
+            "from": "users",
+            "localField": "requested_by",
+            "foreignField": "_id",
+            "as": "user"
+        }},
+        {"$unwind": "$department"},
+        {"$unwind": "$item"},
+        {"$unwind": "$user"},
+        {"$project": {
+            "id": {"$toString": "$_id"},
+            "request_date": 1,
+            "department": "$department.name",
+            "item_name": "$item.name",
+            "category": "$item.category",
+            "quantity": 1,
+            "unit": "$item.unit",
+            "requested_by": "$user.full_name",
+            "notes": 1,
+            "current_stock": "$item.current_stock"
+        }},
+        {"$sort": {"request_date": -1}}
+    ]
+    
+    pending_requests_data = list(requests_collection.aggregate(pipeline))
+    pending_requests = pd.DataFrame(pending_requests_data)
     
     if not pending_requests.empty:
         st.write("Permintaan yang Menunggu Persetujuan:")
@@ -156,66 +190,59 @@ def manage_requests():
         st.info("Tidak ada permintaan yang menunggu persetujuan.")
 
 def process_request(request_id, status):
-    conn = get_db_connection()
-    cursor = conn.cursor()
+    db = MongoDBConnection.get_instance()
+    requests_collection = db.item_requests
+    items_collection = db.items
+    transactions_collection = db.inventory_transactions
     
     try:
-        # Begin transaction
-        cursor.execute("BEGIN TRANSACTION")
-        
         # Get request details
-        cursor.execute(
-            """
-            SELECT r.*, i.current_stock, i.name as item_name, i.unit
-            FROM item_requests r
-            JOIN items i ON r.item_id = i.id
-            WHERE r.id = ?
-            """,
-            (request_id,)
-        )
-        request = cursor.fetchone()
+        request_obj = requests_collection.find_one({"_id": ObjectId(request_id)})
+        if not request_obj:
+            st.error("Permintaan tidak ditemukan")
+            return
+        
+        # Get item details
+        item = items_collection.find_one({"_id": request_obj["item_id"]})
+        if not item:
+            st.error("Item tidak ditemukan")
+            return
         
         if status == 'approved':
-            if request['quantity'] > request['current_stock']:
+            if request_obj['quantity'] > item['current_stock']:
                 st.error("Stok tidak mencukupi untuk memenuhi permintaan ini!")
-                cursor.execute("ROLLBACK")
                 return
             
             # Update item stock
-            cursor.execute(
-                "UPDATE items SET current_stock = current_stock - ? WHERE id = ?",
-                (request['quantity'], request['item_id'])
+            items_collection.update_one(
+                {"_id": request_obj["item_id"]},
+                {"$inc": {"current_stock": -request_obj["quantity"]}}
             )
             
             # Record transaction
-            cursor.execute(
-                """
-                INSERT INTO inventory_transactions 
-                (item_id, transaction_type, quantity, from_department_id, to_department_id, notes, created_by)
-                VALUES (?, 'issue', ?, ?, ?, ?, ?)
-                """,
-                (
-                    request['item_id'], 
-                    request['quantity'],
-                    1,  # Warehouse department ID
-                    request['department_id'],
-                    f"Permintaan #{request_id}",
-                    st.session_state['user']['id']
-                )
-            )
+            transaction_data = {
+                "item_id": request_obj["item_id"],
+                "transaction_type": "issue",
+                "quantity": request_obj["quantity"],
+                "from_department_id": ObjectId("6570f8a0f1a0b8c9d0e1f2a3"),  # Warehouse department ID
+                "to_department_id": request_obj["department_id"],
+                "notes": f"Permintaan #{request_id}",
+                "created_by": ObjectId(st.session_state['user']['id']),
+                "created_at": datetime.now()
+            }
+            transactions_collection.insert_one(transaction_data)
         
         # Update request status
-        cursor.execute(
-            """
-            UPDATE item_requests 
-            SET status = ?, fulfilled_date = CURRENT_TIMESTAMP, fulfilled_by = ?
-            WHERE id = ?
-            """,
-            (status, st.session_state['user']['id'], request_id)
+        requests_collection.update_one(
+            {"_id": ObjectId(request_id)},
+            {
+                "$set": {
+                    "status": status,
+                    "fulfilled_date": datetime.now(),
+                    "fulfilled_by": ObjectId(st.session_state['user']['id'])
+                }
+            }
         )
-        
-        # Commit transaction
-        cursor.execute("COMMIT")
         
         if status == 'approved':
             st.success(f"Permintaan #{request_id} telah disetujui dan barang telah didistribusikan.")
@@ -225,11 +252,8 @@ def process_request(request_id, status):
         # Refresh page
         st.rerun()
         
-    except sqlite3.Error as e:
-        cursor.execute("ROLLBACK")
+    except Exception as e:
         st.error(f"Error: {e}")
-    finally:
-        conn.close()
 
 def request_history():
     st.subheader("Riwayat Permintaan")
@@ -256,15 +280,17 @@ def request_history():
     
     with col2:
         # Department filter
-        conn = get_db_connection()
-        departments = pd.read_sql_query("SELECT id, name FROM departments ORDER BY name", conn)
-        conn.close()
+        db = MongoDBConnection.get_instance()
+        departments_collection = db.departments
+        departments_data = list(departments_collection.find().sort("name", 1))
+        departments = pd.DataFrame(departments_data)
         
         dept_options = ["Semua"] + [row['name'] for _, row in departments.iterrows()]
         selected_dept = st.selectbox("Departemen", dept_options)
         
         if selected_dept != "Semua":
-            dept_id = departments[departments['name'] == selected_dept]['id'].iloc[0]
+            dept_doc = departments_collection.find_one({"name": selected_dept})
+            dept_id = dept_doc["_id"] if dept_doc else None
         else:
             dept_id = None
     
@@ -283,36 +309,72 @@ def request_history():
             start_date = date_range[0]
             end_date = date_range[0]
     
-    # Build query
-    query = """
-    SELECT r.id, r.request_date, r.fulfilled_date, d.name as department,
-           i.name as item_name, i.category, r.quantity, i.unit,
-           u1.full_name as requested_by, u2.full_name as fulfilled_by,
-           r.status, r.notes
-    FROM item_requests r
-    JOIN departments d ON r.department_id = d.id
-    JOIN items i ON r.item_id = i.id
-    JOIN users u1 ON r.requested_by = u1.id
-    LEFT JOIN users u2 ON r.fulfilled_by = u2.id
-    WHERE r.request_date BETWEEN ? AND ?
-    """
-    
-    params = [start_date.strftime('%Y-%m-%d'), (end_date + pd.Timedelta(days=1)).strftime('%Y-%m-%d')]
+    # Build MongoDB aggregation pipeline
+    match_stage = {
+        "request_date": {
+            "$gte": datetime.combine(start_date, datetime.min.time()),
+            "$lte": datetime.combine(end_date, datetime.max.time())
+        }
+    }
     
     if status:
-        query += " AND r.status = ?"
-        params.append(status)
+        match_stage["status"] = status
     
     if dept_id:
-        query += " AND r.department_id = ?"
-        params.append(dept_id)
+        match_stage["department_id"] = dept_id
     
-    query += " ORDER BY r.request_date DESC"
+    pipeline = [
+        {"$match": match_stage},
+        {"$lookup": {
+            "from": "departments",
+            "localField": "department_id",
+            "foreignField": "_id",
+            "as": "department"
+        }},
+        {"$lookup": {
+            "from": "items",
+            "localField": "item_id",
+            "foreignField": "_id",
+            "as": "item"
+        }},
+        {"$lookup": {
+            "from": "users",
+            "localField": "requested_by",
+            "foreignField": "_id",
+            "as": "user_request"
+        }},
+        {"$lookup": {
+            "from": "users",
+            "localField": "fulfilled_by",
+            "foreignField": "_id",
+            "as": "user_fulfill"
+        }},
+        {"$unwind": "$department"},
+        {"$unwind": "$item"},
+        {"$unwind": {"path": "$user_request", "preserveNullAndEmptyArrays": True}},
+        {"$unwind": {"path": "$user_fulfill", "preserveNullAndEmptyArrays": True}},
+        {"$project": {
+            "id": {"$toString": "$_id"},
+            "request_date": 1,
+            "fulfilled_date": 1,
+            "department": "$department.name",
+            "item_name": "$item.name",
+            "category": "$item.category",
+            "quantity": 1,
+            "unit": "$item.unit",
+            "requested_by": "$user_request.full_name",
+            "fulfilled_by": "$user_fulfill.full_name",
+            "status": 1,
+            "notes": 1
+        }},
+        {"$sort": {"request_date": -1}}
+    ]
     
-    # Execute query
-    conn = get_db_connection()
-    requests = pd.read_sql_query(query, conn, params=params)
-    conn.close()
+    # Execute aggregation
+    db = MongoDBConnection.get_instance()
+    requests_collection = db.item_requests
+    requests_data = list(requests_collection.aggregate(pipeline))
+    requests = pd.DataFrame(requests_data)
     
     # Display results
     if not requests.empty:

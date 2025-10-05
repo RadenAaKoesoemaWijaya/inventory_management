@@ -4,14 +4,34 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-from utils.auth import require_auth, require_role
-from utils.database import get_db_connection, get_items_low_stock
+from utils.auth import require_auth
+from utils.database import MongoDBConnection
+from utils.realtime import RealtimeDashboard, display_realtime_widget
+from utils.notifications import NotificationManager, display_notification_widget
+from utils.recommendations import InventoryRecommendation, display_recommendation_widget
+from utils.analytics import InventoryAnalytics, display_analytics_widget
 from utils.helpers import get_stock_status, get_department_consumption, get_top_consumed_items
 
 def app():
     require_auth()
     
-    st.title("Dashboard SIMASYANTO")
+    st.title("📊 Dashboard Inventory")
+    
+    # Display notification widget
+    display_notification_widget()
+    
+    # Display recommendation widget
+    display_recommendation_widget()
+    
+    # Display analytics widget
+    display_analytics_widget()
+    
+    # Add real-time section
+    st.header("📊 Monitoring Real-time")
+    realtime_dashboard = RealtimeDashboard()
+    realtime_dashboard.run_realtime_updates()
+    
+    st.divider()
     
     # Get stock status
     stock_status = get_stock_status()
@@ -57,7 +77,30 @@ def app():
     with col1:
         # Display low stock items
         st.subheader("Item dengan Stok Rendah")
-        low_stock_items = get_items_low_stock()
+        
+        # Get low stock items from MongoDB
+        db = MongoDBConnection.get_instance()
+        items_collection = db.items
+        
+        low_stock_pipeline = [
+            {
+                "$match": {
+                    "$expr": {"$lte": ["$current_stock", "$min_stock"]}
+                }
+            },
+            {
+                "$project": {
+                    "name": 1,
+                    "category": 1,
+                    "current_stock": 1,
+                    "min_stock": 1,
+                    "unit": 1
+                }
+            }
+        ]
+        
+        low_stock_data = list(items_collection.aggregate(low_stock_pipeline))
+        low_stock_items = pd.DataFrame(low_stock_data)
         
         if not low_stock_items.empty:
             # Add progress bar for stock level
@@ -121,25 +164,65 @@ def app():
     # Recent transactions
     st.subheader("Transaksi Terbaru")
     
-    # Get recent transactions
-    conn = get_db_connection()
-    recent_transactions = pd.read_sql_query(
-        """
-        SELECT t.id, t.transaction_date, i.name as item_name, i.category, 
-               t.quantity, i.unit, t.transaction_type,
-               d1.name as from_department, d2.name as to_department,
-               u.full_name as created_by
-        FROM inventory_transactions t
-        JOIN items i ON t.item_id = i.id
-        JOIN users u ON t.created_by = u.id
-        LEFT JOIN departments d1 ON t.from_department_id = d1.id
-        LEFT JOIN departments d2 ON t.to_department_id = d2.id
-        ORDER BY t.transaction_date DESC
-        LIMIT 10
-        """,
-        conn
-    )
-    conn.close()
+    # Get recent transactions from MongoDB
+    db = MongoDBConnection.get_instance()
+    transactions_collection = db.inventory_transactions
+    
+    recent_pipeline = [
+        {
+            "$lookup": {
+                "from": "items",
+                "localField": "item_id",
+                "foreignField": "_id",
+                "as": "item_info"
+            }
+        },
+        {
+            "$lookup": {
+                "from": "users",
+                "localField": "created_by",
+                "foreignField": "_id",
+                "as": "user_info"
+            }
+        },
+        {
+            "$lookup": {
+                "from": "departments",
+                "localField": "from_department_id",
+                "foreignField": "_id",
+                "as": "from_dept_info"
+            }
+        },
+        {
+            "$lookup": {
+                "from": "departments",
+                "localField": "to_department_id",
+                "foreignField": "_id",
+                "as": "to_dept_info"
+            }
+        },
+        {"$unwind": "$item_info"},
+        {"$unwind": "$user_info"},
+        {
+            "$project": {
+                "id": {"$toString": "$_id"},
+                "transaction_date": "$created_at",
+                "item_name": "$item_info.name",
+                "category": "$item_info.category",
+                "quantity": 1,
+                "unit": "$item_info.unit",
+                "transaction_type": 1,
+                "from_department": {"$arrayElemAt": ["$from_dept_info.name", 0]},
+                "to_department": {"$arrayElemAt": ["$to_dept_info.name", 0]},
+                "created_by": "$user_info.full_name"
+            }
+        },
+        {"$sort": {"transaction_date": -1}},
+        {"$limit": 10}
+    ]
+    
+    recent_transactions_data = list(transactions_collection.aggregate(recent_pipeline))
+    recent_transactions = pd.DataFrame(recent_transactions_data)
     
     if not recent_transactions.empty:
         # Format transaction type
@@ -175,21 +258,43 @@ def app():
     # Monthly consumption trend
     st.subheader("Tren Konsumsi Bulanan")
     
-    # Get monthly consumption data
-    conn = get_db_connection()
-    monthly_trend = pd.read_sql_query(
-        """
-        SELECT strftime('%Y-%m', t.transaction_date) as month, 
-               SUM(CASE WHEN t.transaction_type = 'issue' THEN t.quantity ELSE 0 END) as consumption,
-               SUM(CASE WHEN t.transaction_type = 'receive' THEN t.quantity ELSE 0 END) as receipt
-        FROM inventory_transactions t
-        WHERE t.transaction_date >= date('now', '-12 months')
-        GROUP BY strftime('%Y-%m', t.transaction_date)
-        ORDER BY month
-        """,
-        conn
-    )
-    conn.close()
+    # Get monthly consumption data from MongoDB
+    db = MongoDBConnection.get_instance()
+    transactions_collection = db.inventory_transactions
+    
+    # Calculate date 12 months ago
+    twelve_months_ago = datetime.now() - timedelta(days=365)
+    
+    monthly_pipeline = [
+        {
+            "$match": {
+                "created_at": {"$gte": twelve_months_ago}
+            }
+        },
+        {
+            "$group": {
+                "_id": {
+                    "$dateToString": {"format": "%Y-%m", "date": "$created_at"}
+                },
+                "consumption": {
+                    "$sum": {
+                        "$cond": [{"$eq": ["$transaction_type", "issue"]}, "$quantity", 0]
+                    }
+                },
+                "receipt": {
+                    "$sum": {
+                        "$cond": [{"$eq": ["$transaction_type", "receive"]}, "$quantity", 0]
+                    }
+                }
+            }
+        },
+        {"$sort": {"_id": 1}}
+    ]
+    
+    monthly_data = list(transactions_collection.aggregate(monthly_pipeline))
+    monthly_trend = pd.DataFrame(monthly_data)
+    if not monthly_trend.empty:
+        monthly_trend.columns = ['month', 'consumption', 'receipt']
     
     if not monthly_trend.empty and len(monthly_trend) > 1:
         # Convert to datetime for better display

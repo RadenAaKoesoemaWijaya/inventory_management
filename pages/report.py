@@ -6,7 +6,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
 from utils.auth import require_auth, require_role
-from utils.database import get_db_connection
+from utils.database import MongoDBConnection
 from utils.helpers import format_date
 import io
 import base64
@@ -40,46 +40,72 @@ def app():
 def inventory_summary():
     st.subheader("Ringkasan Inventaris")
     
-    # Get inventory data
-    conn = get_db_connection()
+    # Get inventory data from MongoDB
+    db = MongoDBConnection.get_instance()
+    items_collection = db.items
     
-    # Get category summary
-    category_summary = pd.read_sql_query(
-        """
-        SELECT category, COUNT(*) as item_count, 
-               SUM(current_stock) as total_stock,
-               SUM(CASE WHEN current_stock <= min_stock THEN 1 ELSE 0 END) as low_stock_count
-        FROM items
-        GROUP BY category
-        ORDER BY category
-        """,
-        conn
-    )
+    # Get category summary using MongoDB aggregation
+    category_pipeline = [
+        {
+            "$group": {
+                "_id": "$category",
+                "item_count": {"$sum": 1},
+                "total_stock": {"$sum": "$current_stock"},
+                "low_stock_count": {
+                    "$sum": {
+                        "$cond": [{"$lte": ["$current_stock", "$min_stock"]}, 1, 0]
+                    }
+                }
+            }
+        },
+        {
+            "$project": {
+                "category": "$_id",
+                "item_count": 1,
+                "total_stock": 1,
+                "low_stock_count": 1,
+                "_id": 0
+            }
+        },
+        {"$sort": {"category": 1}}
+    ]
     
-    # Get top 10 items by value
-    top_items_value = pd.read_sql_query(
-        """
-        SELECT name, category, current_stock, unit
-        FROM items
-        ORDER BY current_stock DESC
-        LIMIT 10
-        """,
-        conn
-    )
+    category_summary_data = list(items_collection.aggregate(category_pipeline))
+    category_summary = pd.DataFrame(category_summary_data)
+    
+    # Get top 10 items by stock value
+    top_items_cursor = items_collection.find().sort("current_stock", -1).limit(10)
+    top_items_data = list(top_items_cursor)
+    top_items_value = pd.DataFrame(top_items_data)
     
     # Get low stock items
-    low_stock_items = pd.read_sql_query(
-        """
-        SELECT name, category, current_stock, min_stock, unit,
-               ROUND((current_stock * 100.0 / min_stock), 2) as stock_percentage
-        FROM items
-        WHERE current_stock <= min_stock
-        ORDER BY stock_percentage
-        """,
-        conn
-    )
+    low_stock_pipeline = [
+        {
+            "$match": {
+                "$expr": {"$lte": ["$current_stock", "$min_stock"]}
+            }
+        },
+        {
+            "$project": {
+                "name": 1,
+                "category": 1,
+                "current_stock": 1,
+                "min_stock": 1,
+                "unit": 1,
+                "stock_percentage": {
+                    "$cond": [
+                        {"$gt": ["$min_stock", 0]},
+                        {"$multiply": [{"$divide": ["$current_stock", "$min_stock"]}, 100]},
+                        0
+                    ]
+                }
+            }
+        },
+        {"$sort": {"stock_percentage": 1}}
+    ]
     
-    conn.close()
+    low_stock_data = list(items_collection.aggregate(low_stock_pipeline))
+    low_stock_items = pd.DataFrame(low_stock_data)
     
     # Display category summary
     st.write("### Ringkasan Kategori")
@@ -181,56 +207,90 @@ def consumption_analysis():
             end_date = datetime.now()
             start_date = end_date - timedelta(days=days)
     
-    # Get consumption data
-    conn = get_db_connection()
+    # Get consumption data from MongoDB
+    db = MongoDBConnection.get_instance()
+    transactions_collection = db.inventory_transactions
+    
+    # Build match stage for date range and transaction type
+    match_stage = {
+        "transaction_type": "issue",
+        "created_at": {
+            "$gte": datetime.combine(start_date, datetime.min.time()),
+            "$lte": datetime.combine(end_date, datetime.max.time())
+        }
+    }
     
     # Consumption by department
-    dept_consumption = pd.read_sql_query(
-        """
-        SELECT d.name as department, SUM(t.quantity) as total_consumption
-        FROM inventory_transactions t
-        JOIN departments d ON t.to_department_id = d.id
-        WHERE t.transaction_type = 'issue'
-        AND t.transaction_date BETWEEN ? AND ?
-        GROUP BY t.to_department_id
-        ORDER BY total_consumption DESC
-        """,
-        conn,
-        params=(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
-    )
+    dept_pipeline = [
+        {"$match": match_stage},
+        {
+            "$lookup": {
+                "from": "departments",
+                "localField": "to_department_id",
+                "foreignField": "_id",
+                "as": "department_info"
+            }
+        },
+        {"$unwind": "$department_info"},
+        {
+            "$group": {
+                "_id": "$to_department_id",
+                "department": {"$first": "$department_info.name"},
+                "total_consumption": {"$sum": "$quantity"}
+            }
+        },
+        {"$sort": {"total_consumption": -1}}
+    ]
+    
+    dept_consumption_data = list(transactions_collection.aggregate(dept_pipeline))
+    dept_consumption = pd.DataFrame(dept_consumption_data)
     
     # Consumption by item
-    item_consumption = pd.read_sql_query(
-        """
-        SELECT i.name as item_name, i.category, SUM(t.quantity) as total_consumption, i.unit
-        FROM inventory_transactions t
-        JOIN items i ON t.item_id = i.id
-        WHERE t.transaction_type = 'issue'
-        AND t.transaction_date BETWEEN ? AND ?
-        GROUP BY t.item_id
-        ORDER BY total_consumption DESC
-        LIMIT 10
-        """,
-        conn,
-        params=(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
-    )
+    item_pipeline = [
+        {"$match": match_stage},
+        {
+            "$lookup": {
+                "from": "items",
+                "localField": "item_id",
+                "foreignField": "_id",
+                "as": "item_info"
+            }
+        },
+        {"$unwind": "$item_info"},
+        {
+            "$group": {
+                "_id": "$item_id",
+                "item_name": {"$first": "$item_info.name"},
+                "category": {"$first": "$item_info.category"},
+                "unit": {"$first": "$item_info.unit"},
+                "total_consumption": {"$sum": "$quantity"}
+            }
+        },
+        {"$sort": {"total_consumption": -1}},
+        {"$limit": 10}
+    ]
+    
+    item_consumption_data = list(transactions_collection.aggregate(item_pipeline))
+    item_consumption = pd.DataFrame(item_consumption_data)
     
     # Monthly consumption trend
-    monthly_trend = pd.read_sql_query(
-        """
-        SELECT strftime('%Y-%m', t.transaction_date) as month, 
-               SUM(t.quantity) as total_consumption
-        FROM inventory_transactions t
-        WHERE t.transaction_type = 'issue'
-        AND t.transaction_date BETWEEN ? AND ?
-        GROUP BY strftime('%Y-%m', t.transaction_date)
-        ORDER BY month
-        """,
-        conn,
-        params=(start_date.strftime('%Y-%m-%d'), end_date.strftime('%Y-%m-%d'))
-    )
+    monthly_pipeline = [
+        {"$match": match_stage},
+        {
+            "$group": {
+                "_id": {
+                    "$dateToString": {"format": "%Y-%m", "date": "$created_at"}
+                },
+                "total_consumption": {"$sum": "$quantity"}
+            }
+        },
+        {"$sort": {"_id": 1}}
+    ]
     
-    conn.close()
+    monthly_data = list(transactions_collection.aggregate(monthly_pipeline))
+    monthly_trend = pd.DataFrame(monthly_data)
+    if not monthly_trend.empty:
+        monthly_trend.columns = ['month', 'total_consumption']
     
     # Display department consumption
     st.write("### Konsumsi per Departemen")
@@ -309,15 +369,17 @@ def transaction_report():
     
     with col2:
         # Department filter
-        conn = get_db_connection()
-        departments = pd.read_sql_query("SELECT id, name FROM departments ORDER BY name", conn)
-        conn.close()
+        db = MongoDBConnection.get_instance()
+        departments_collection = db.departments
+        departments_data = list(departments_collection.find().sort("name", 1))
+        departments = pd.DataFrame(departments_data)
         
         dept_options = ["Semua"] + [row['name'] for _, row in departments.iterrows()]
         selected_dept = st.selectbox("Departemen", dept_options)
         
         if selected_dept != "Semua":
-            dept_id = departments[departments['name'] == selected_dept]['id'].iloc[0]
+            dept_doc = departments_collection.find_one({"name": selected_dept})
+            dept_id = dept_doc["_id"] if dept_doc else None
         else:
             dept_id = None
     
@@ -336,36 +398,83 @@ def transaction_report():
             start_date = date_range[0]
             end_date = date_range[0]
     
-    # Build query
-    query = """
-    SELECT t.id, t.transaction_date, i.name as item_name, i.category, 
-           t.quantity, i.unit, t.transaction_type,
-           d1.name as from_department, d2.name as to_department,
-           u.full_name as created_by, t.notes
-    FROM inventory_transactions t
-    JOIN items i ON t.item_id = i.id
-    JOIN users u ON t.created_by = u.id
-    LEFT JOIN departments d1 ON t.from_department_id = d1.id
-    LEFT JOIN departments d2 ON t.to_department_id = d2.id
-    WHERE t.transaction_date BETWEEN ? AND ?
-    """
+    # Build MongoDB aggregation pipeline
+    db = MongoDBConnection.get_instance()
+    transactions_collection = db.inventory_transactions
     
-    params = [start_date.strftime('%Y-%m-%d'), (end_date + pd.Timedelta(days=1)).strftime('%Y-%m-%d')]
+    # Match stage with date range
+    match_stage = {
+        "created_at": {
+            "$gte": datetime.combine(start_date, datetime.min.time()),
+            "$lte": datetime.combine(end_date + pd.Timedelta(days=1), datetime.min.time())
+        }
+    }
     
     if transaction_filter:
-        query += " AND t.transaction_type = ?"
-        params.append(transaction_filter)
+        match_stage["transaction_type"] = transaction_filter
     
     if dept_id:
-        query += " AND (t.from_department_id = ? OR t.to_department_id = ?)"
-        params.extend([dept_id, dept_id])
+        match_stage["$or"] = [
+            {"from_department_id": dept_id},
+            {"to_department_id": dept_id}
+        ]
     
-    query += " ORDER BY t.transaction_date DESC"
+    pipeline = [
+        {"$match": match_stage},
+        {
+            "$lookup": {
+                "from": "items",
+                "localField": "item_id",
+                "foreignField": "_id",
+                "as": "item_info"
+            }
+        },
+        {
+            "$lookup": {
+                "from": "users",
+                "localField": "created_by",
+                "foreignField": "_id",
+                "as": "user_info"
+            }
+        },
+        {
+            "$lookup": {
+                "from": "departments",
+                "localField": "from_department_id",
+                "foreignField": "_id",
+                "as": "from_dept_info"
+            }
+        },
+        {
+            "$lookup": {
+                "from": "departments",
+                "localField": "to_department_id",
+                "foreignField": "_id",
+                "as": "to_dept_info"
+            }
+        },
+        {"$unwind": "$item_info"},
+        {"$unwind": "$user_info"},
+        {
+            "$project": {
+                "id": {"$toString": "$_id"},
+                "transaction_date": "$created_at",
+                "item_name": "$item_info.name",
+                "category": "$item_info.category",
+                "quantity": 1,
+                "unit": "$item_info.unit",
+                "transaction_type": 1,
+                "from_department": {"$arrayElemAt": ["$from_dept_info.name", 0]},
+                "to_department": {"$arrayElemAt": ["$to_dept_info.name", 0]},
+                "created_by": "$user_info.full_name",
+                "notes": 1
+            }
+        },
+        {"$sort": {"transaction_date": -1}}
+    ]
     
-    # Execute query
-    conn = get_db_connection()
-    transactions = pd.read_sql_query(query, conn, params=params)
-    conn.close()
+    transactions_data = list(transactions_collection.aggregate(pipeline))
+    transactions = pd.DataFrame(transactions_data)
     
     # Display results
     if not transactions.empty:

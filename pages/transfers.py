@@ -2,8 +2,8 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime
 from utils.auth import require_auth, require_role
-from utils.database import get_db_connection
-import sqlite3
+from utils.database import MongoDBConnection
+from bson.objectid import ObjectId
 
 def app():
     require_auth()
@@ -27,9 +27,10 @@ def receive_items():
     st.write("Gunakan form ini untuk mencatat penerimaan barang dari pemasok atau bagian pengadaan.")
     
     # Get items from database
-    conn = get_db_connection()
-    items = pd.read_sql_query("SELECT id, name, category, unit FROM items ORDER BY category, name", conn)
-    conn.close()
+    db = MongoDBConnection.get_instance()
+    items_collection = db.items
+    items_data = list(items_collection.find().sort([("category", 1), ("name", 1)]))
+    items = pd.DataFrame(items_data)
     
     if items.empty:
         st.warning("Belum ada item dalam database. Silakan tambahkan item terlebih dahulu.")
@@ -42,20 +43,20 @@ def receive_items():
         item_id = int(selected_item.split(" - ")[0])
         
         # Get item details
-        conn = get_db_connection()
-        item_details = pd.read_sql_query("SELECT * FROM items WHERE id = ?", conn, params=(item_id,))
-        conn.close()
+        db = MongoDBConnection.get_instance()
+        items_collection = db.items
+        item_details = items_collection.find_one({"_id": ObjectId(item_id)})
         
-        if not item_details.empty:
-            item = item_details.iloc[0]
+        if item_details:
+            item = pd.Series(item_details)
             st.write(f"Stok saat ini: **{item['current_stock']}** {item['unit']}")
         
         # Quantity
         quantity = st.number_input("Jumlah", min_value=1, value=1)
         
-        conn = get_db_connection()
-        departments = pd.read_sql_query("SELECT id, name FROM departments ORDER BY name", conn)
-        conn.close()
+        departments_collection = db.departments
+        departments_data = list(departments_collection.find().sort("name", 1))
+        departments = pd.DataFrame(departments_data)
         
         dept_options = [f"{row['id']} - {row['name']}" for _, row in departments.iterrows()]
         from_dept = st.selectbox("Dari Departemen", dept_options, 
@@ -77,50 +78,47 @@ def receive_items():
             if from_dept_id == to_dept_id:
                 st.error("Departemen asal dan tujuan tidak boleh sama!")
             else:
-                conn = get_db_connection()
-                cursor = conn.cursor()
+                db = MongoDBConnection.get_instance()
+                items_collection = db.items
+                transactions_collection = db.inventory_transactions
                 
                 try:
-                    # Begin transaction
-                    cursor.execute("BEGIN TRANSACTION")
-                    
                     # Update item stock
-                    cursor.execute(
-                        "UPDATE items SET current_stock = current_stock + ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                        (quantity, item_id)
+                    items_collection.update_one(
+                        {"_id": ObjectId(item_id)},
+                        {
+                            "$inc": {"current_stock": quantity},
+                            "$set": {"updated_at": datetime.now()}
+                        }
                     )
                     
                     # Record transaction
-                    cursor.execute(
-                        """
-                        INSERT INTO inventory_transactions 
-                        (item_id, transaction_type, quantity, from_department_id, to_department_id, notes, created_by)
-                        VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (item_id, 'receive', quantity, from_dept_id, to_dept_id, notes, st.session_state['user']['id'])
-                    )
+                    transaction_data = {
+                        "item_id": ObjectId(item_id),
+                        "transaction_type": "receive",
+                        "quantity": quantity,
+                        "from_department_id": ObjectId(from_dept_id),
+                        "to_department_id": ObjectId(to_dept_id),
+                        "notes": notes,
+                        "created_by": ObjectId(st.session_state['user']['id']),
+                        "created_at": datetime.now()
+                    }
+                    transactions_collection.insert_one(transaction_data)
                     
-                    # Commit transaction
-                    cursor.execute("COMMIT")
                     st.success(f"Penerimaan {quantity} {item['unit']} {item['name']} berhasil dicatat!")
                     
-                except sqlite3.Error as e:
-                    cursor.execute("ROLLBACK")
+                except Exception as e:
                     st.error(f"Error: {e}")
-                finally:
-                    conn.close()
 
 def distribute_items():
     st.subheader("Distribusi Barang")
     st.write("Gunakan form ini untuk mencatat distribusi barang dari gudang ke unit-unit.")
     
     # Get items from database
-    conn = get_db_connection()
-    items = pd.read_sql_query(
-        "SELECT id, name, category, unit, current_stock FROM items WHERE current_stock > 0 ORDER BY category, name", 
-        conn
-    )
-    conn.close()
+    db = MongoDBConnection.get_instance()
+    items_collection = db.items
+    items_data = list(items_collection.find({"current_stock": {"$gt": 0}}).sort([("category", 1), ("name", 1)]))
+    items = pd.DataFrame(items_data)
     
     if items.empty:
         st.warning("Tidak ada item dengan stok tersedia. Silakan tambahkan stok terlebih dahulu.")
@@ -134,12 +132,12 @@ def distribute_items():
         item_id = int(selected_item.split(" - ")[0])
         
         # Get item details
-        conn = get_db_connection()
-        item_details = pd.read_sql_query("SELECT * FROM items WHERE id = ?", conn, params=(item_id,))
-        conn.close()
+        db = MongoDBConnection.get_instance()
+        items_collection = db.items
+        item_details = items_collection.find_one({"_id": ObjectId(item_id)})
         
-        if not item_details.empty:
-            item = item_details.iloc[0]
+        if item_details:
+            item = pd.Series(item_details)
             max_qty = item['current_stock']
             st.write(f"Stok tersedia: **{max_qty}** {item['unit']}")
             
@@ -147,9 +145,9 @@ def distribute_items():
             quantity = st.number_input("Jumlah", min_value=1, max_value=int(max_qty), value=1)
             
             # Departments
-            conn = get_db_connection()
-            departments = pd.read_sql_query("SELECT id, name FROM departments ORDER BY name", conn)
-            conn.close()
+            departments_collection = db.departments
+            departments_data = list(departments_collection.find().sort("name", 1))
+            departments = pd.DataFrame(departments_data)
             
             dept_options = [f"{row['id']} - {row['name']}" for _, row in departments.iterrows()]
             
@@ -171,39 +169,38 @@ def distribute_items():
             if submit:
                 if from_dept_id == to_dept_id:
                     st.error("Departemen asal dan tujuan tidak boleh sama!")
-                else:
-                    conn = get_db_connection()
-                    cursor = conn.cursor()
+            else:
+                db = MongoDBConnection.get_instance()
+                items_collection = db.items
+                transactions_collection = db.inventory_transactions
+                
+                try:
+                    # Update item stock
+                    items_collection.update_one(
+                        {"_id": ObjectId(item_id)},
+                        {
+                            "$inc": {"current_stock": -quantity},
+                            "$set": {"updated_at": datetime.now()}
+                        }
+                    )
                     
-                    try:
-                        # Begin transaction
-                        cursor.execute("BEGIN TRANSACTION")
-                        
-                        # Update item stock
-                        cursor.execute(
-                            "UPDATE items SET current_stock = current_stock - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                            (quantity, item_id)
-                        )
-                        
-                        # Record transaction
-                        cursor.execute(
-                            """
-                            INSERT INTO inventory_transactions 
-                            (item_id, transaction_type, quantity, from_department_id, to_department_id, notes, created_by)
-                            VALUES (?, ?, ?, ?, ?, ?, ?)
-                            """,
-                            (item_id, 'issue', quantity, from_dept_id, to_dept_id, notes, st.session_state['user']['id'])
-                        )
-                        
-                        # Commit transaction
-                        cursor.execute("COMMIT")
-                        st.success(f"Distribusi {quantity} {item['unit']} {item['name']} berhasil dicatat!")
-                        
-                    except sqlite3.Error as e:
-                        cursor.execute("ROLLBACK")
-                        st.error(f"Error: {e}")
-                    finally:
-                        conn.close()
+                    # Record transaction
+                    transaction_data = {
+                        "item_id": ObjectId(item_id),
+                        "transaction_type": "issue",
+                        "quantity": quantity,
+                        "from_department_id": ObjectId(from_dept_id),
+                        "to_department_id": ObjectId(to_dept_id),
+                        "notes": notes,
+                        "created_by": ObjectId(st.session_state['user']['id']),
+                        "created_at": datetime.now()
+                    }
+                    transactions_collection.insert_one(transaction_data)
+                    
+                    st.success(f"Distribusi {quantity} {item['unit']} {item['name']} berhasil dicatat!")
+                    
+                except Exception as e:
+                    st.error(f"Error: {e}")
 
 def transfer_history():
     st.subheader("Riwayat Transfer")
@@ -228,15 +225,17 @@ def transfer_history():
     
     with col2:
         # Department filter
-        conn = get_db_connection()
-        departments = pd.read_sql_query("SELECT id, name FROM departments ORDER BY name", conn)
-        conn.close()
+        db = MongoDBConnection.get_instance()
+        departments_collection = db.departments
+        departments_data = list(departments_collection.find().sort("name", 1))
+        departments = pd.DataFrame(departments_data)
         
         dept_options = ["Semua"] + [row['name'] for _, row in departments.iterrows()]
         selected_dept = st.selectbox("Departemen", dept_options)
         
         if selected_dept != "Semua":
-            dept_id = departments[departments['name'] == selected_dept]['id'].iloc[0]
+            dept_doc = departments_collection.find_one({"name": selected_dept})
+            dept_id = dept_doc["_id"] if dept_doc else None
         else:
             dept_id = None
     
@@ -255,36 +254,83 @@ def transfer_history():
             start_date = date_range[0]
             end_date = date_range[0]
     
-    # Build query
-    query = """
-    SELECT t.id, t.transaction_date, i.name as item_name, i.category, 
-           t.quantity, i.unit, t.transaction_type,
-           d1.name as from_department, d2.name as to_department,
-           u.full_name as created_by, t.notes
-    FROM inventory_transactions t
-    JOIN items i ON t.item_id = i.id
-    JOIN users u ON t.created_by = u.id
-    LEFT JOIN departments d1 ON t.from_department_id = d1.id
-    LEFT JOIN departments d2 ON t.to_department_id = d2.id
-    WHERE t.transaction_date BETWEEN ? AND ?
-    """
+    # Build MongoDB aggregation pipeline
+    db = MongoDBConnection.get_instance()
+    transactions_collection = db.inventory_transactions
     
-    params = [start_date.strftime('%Y-%m-%d'), (end_date + pd.Timedelta(days=1)).strftime('%Y-%m-%d')]
+    # Match stage with date range
+    match_stage = {
+        "created_at": {
+            "$gte": datetime.combine(start_date, datetime.min.time()),
+            "$lte": datetime.combine(end_date + pd.Timedelta(days=1), datetime.min.time())
+        }
+    }
     
     if transaction_filter:
-        query += " AND t.transaction_type = ?"
-        params.append(transaction_filter)
+        match_stage["transaction_type"] = transaction_filter
     
     if dept_id:
-        query += " AND (t.from_department_id = ? OR t.to_department_id = ?)"
-        params.extend([dept_id, dept_id])
+        match_stage["$or"] = [
+            {"from_department_id": dept_id},
+            {"to_department_id": dept_id}
+        ]
     
-    query += " ORDER BY t.transaction_date DESC"
+    pipeline = [
+        {"$match": match_stage},
+        {
+            "$lookup": {
+                "from": "items",
+                "localField": "item_id",
+                "foreignField": "_id",
+                "as": "item_info"
+            }
+        },
+        {
+            "$lookup": {
+                "from": "departments",
+                "localField": "from_department_id",
+                "foreignField": "_id",
+                "as": "from_dept_info"
+            }
+        },
+        {
+            "$lookup": {
+                "from": "departments",
+                "localField": "to_department_id",
+                "foreignField": "_id",
+                "as": "to_dept_info"
+            }
+        },
+        {
+            "$lookup": {
+                "from": "users",
+                "localField": "created_by",
+                "foreignField": "_id",
+                "as": "user_info"
+            }
+        },
+        {"$unwind": "$item_info"},
+        {"$unwind": "$user_info"},
+        {
+            "$project": {
+                "id": {"$toString": "$_id"},
+                "transaction_date": "$created_at",
+                "item_name": "$item_info.name",
+                "category": "$item_info.category",
+                "quantity": 1,
+                "unit": "$item_info.unit",
+                "transaction_type": 1,
+                "from_department": {"$arrayElemAt": ["$from_dept_info.name", 0]},
+                "to_department": {"$arrayElemAt": ["$to_dept_info.name", 0]},
+                "created_by": "$user_info.full_name",
+                "notes": 1
+            }
+        },
+        {"$sort": {"transaction_date": -1}}
+    ]
     
-    # Execute query
-    conn = get_db_connection()
-    transactions = pd.read_sql_query(query, conn, params=params)
-    conn.close()
+    transactions_data = list(transactions_collection.aggregate(pipeline))
+    transactions = pd.DataFrame(transactions_data)
     
     # Display results
     if not transactions.empty:
