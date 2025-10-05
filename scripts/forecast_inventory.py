@@ -1,4 +1,3 @@
-import sqlite3
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
@@ -14,7 +13,7 @@ warnings.filterwarnings('ignore')
 
 # Add parent directory to path to import utils
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from utils.database import get_db_connection
+from utils.database import MongoDBConnection
 
 def calculate_trend_forecast(historical_data, periods=12):
     """Calculate trend-based forecast using linear regression"""
@@ -93,44 +92,39 @@ def run_forecast():
     os.makedirs(reports_dir, exist_ok=True)
     
     # Get database connection
-    conn = get_db_connection()
+    db = MongoDBConnection()
     
     try:
         # Get all items with transaction history
-        items_df = pd.read_sql_query("""
-            SELECT DISTINCT i.id, i.name, i.category, i.current_stock, i.min_stock, i.unit,
-                   COUNT(t.id) as transaction_count
-            FROM items i
-            LEFT JOIN inventory_transactions t ON i.id = t.item_id AND t.transaction_type = 'issue'
-            GROUP BY i.id, i.name, i.category, i.current_stock, i.min_stock, i.unit
-            ORDER BY transaction_count DESC, i.name
-        """, conn)
+        items_collection = db.get_collection('items')
+        transactions_collection = db.get_collection('inventory_transactions')
+        
+        # Get all items
+        items_data = list(items_collection.find({}))
+        
+        # Count transactions for each item
+        for item in items_data:
+            transaction_count = transactions_collection.count_documents({
+                'item_id': item['_id'],
+                'transaction_type': 'issue'
+            })
+            item['transaction_count'] = transaction_count
+        
+        items_df = pd.DataFrame(items_data)
         
         if items_df.empty:
             print("No items found in database")
             return
         
-        # Create inventory_forecast table if it doesn't exist
-        cursor = conn.cursor()
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS inventory_forecast (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                item_id INTEGER NOT NULL,
-                forecast_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                annual_consumption_rate REAL,
-                projected_annual_consumption REAL,
-                monthly_projected_consumption REAL,
-                months_to_min_stock REAL,
-                reorder_date DATE,
-                recommended_order_qty INTEGER,
-                confidence_level REAL,
-                forecast_method TEXT,
-                FOREIGN KEY (item_id) REFERENCES items (id)
-            )
-        ''')
+        if items_df.empty:
+            print("No items found in database")
+            return
+        
+        # Get forecast collection
+        forecast_collection = db.get_collection('inventory_forecast')
         
         # Clear old forecast data
-        cursor.execute("DELETE FROM inventory_forecast")
+        forecast_collection.delete_many({})
         
         # Process each item with optimized forecasting
         forecast_results = []
@@ -154,20 +148,14 @@ def run_forecast():
                 # Get detailed consumption history
                 two_years_ago = datetime.now() - timedelta(days=730)
                 
-                consumption_query = '''
-                    SELECT transaction_date, quantity
-                    FROM inventory_transactions 
-                    WHERE item_id = ? 
-                    AND transaction_type = 'issue' 
-                    AND transaction_date >= ?
-                    ORDER BY transaction_date
-                '''
+                # Get consumption data from MongoDB
+                consumption_data = list(transactions_collection.find({
+                    'item_id': item_id,
+                    'transaction_type': 'issue',
+                    'transaction_date': {'$gte': two_years_ago}
+                }, {'transaction_date': 1, 'quantity': 1}).sort('transaction_date', 1))
                 
-                consumption_data = pd.read_sql_query(
-                    consumption_query, 
-                    conn, 
-                    params=(item_id, two_years_ago.strftime('%Y-%m-%d'))
-                )
+                consumption_data = pd.DataFrame(consumption_data)
                 
                 if consumption_data.empty:
                     projected_annual = max(min_stock * 2, 10)
@@ -287,25 +275,14 @@ def run_forecast():
                 'projected_annual_consumption': projected_annual,
                 'monthly_projected_consumption': monthly_projected,
                 'months_to_min_stock': months_to_min,
-                'reorder_date': reorder_date.strftime('%Y-%m-%d') if reorder_date else None,
+                'reorder_date': reorder_date,
                 'recommended_order_qty': recommended_qty,
                 'confidence_level': confidence_level,
-                'forecast_method': forecast_method
+                'forecast_method': forecast_method,
+                'forecast_date': datetime.now()
             }
             
             forecast_results.append(forecast_result)
-            
-            # Insert into database with enhanced fields
-            cursor.execute('''
-                INSERT INTO inventory_forecast 
-                (item_id, annual_consumption_rate, projected_annual_consumption, 
-                 monthly_projected_consumption, months_to_min_stock, reorder_date, 
-                 recommended_order_qty, confidence_level, forecast_method)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ''', (
-                item_id, annual_consumption_rate, projected_annual, monthly_projected,
-                months_to_min, reorder_date, recommended_qty, confidence_level, forecast_method
-            ))
             
             processed_count += 1
             
@@ -313,8 +290,10 @@ def run_forecast():
             if processed_count % 10 == 0:
                 print(f"Processed {processed_count} items...")
         
-        # Commit changes
-        conn.commit()
+        # Insert all forecast results into MongoDB
+        if forecast_results:
+            forecast_collection.insert_many(forecast_results)
+            print(f"Successfully inserted {len(forecast_results)} forecast records")
         
         # Create DataFrame for analysis
         forecast_df = pd.DataFrame(forecast_results)
