@@ -7,7 +7,8 @@ import seaborn as sns
 from statsmodels.tsa.arima.model import ARIMA
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 from sklearn.linear_model import LinearRegression
-from .database import get_db_connection
+from .database import MongoDBConnection
+from bson import ObjectId
 
 def format_date(date_str):
     """Format date string for display"""
@@ -17,28 +18,23 @@ def format_date(date_str):
     return date_obj.strftime('%d %b %Y, %H:%M')
 
 def get_stock_status():
-    """Get overall stock status summary"""
-    conn = get_db_connection()
+    """Get overall stock status summary using MongoDB"""
+    db = MongoDBConnection()
+    items_collection = db.get_collection('items')
     
-    # Get total items
-    total_items = pd.read_sql_query('SELECT COUNT(*) as count FROM items', conn).iloc[0]['count']
+    # Get total items count
+    total_items = items_collection.count_documents({})
     
-    # Get low stock items
-    low_stock = pd.read_sql_query(
-        'SELECT COUNT(*) as count FROM items WHERE current_stock <= min_stock', 
-        conn
-    ).iloc[0]['count']
+    # Get low stock items count
+    low_stock = items_collection.count_documents({
+        "$expr": {"$lte": ["$current_stock", "$min_stock"]}
+    })
     
-    # Get out of stock items
-    out_of_stock = pd.read_sql_query(
-        'SELECT COUNT(*) as count FROM items WHERE current_stock = 0', 
-        conn
-    ).iloc[0]['count']
+    # Get out of stock items count
+    out_of_stock = items_collection.count_documents({'current_stock': 0})
     
     # Get healthy stock items
     healthy_stock = total_items - low_stock
-    
-    conn.close()
     
     return {
         'total_items': total_items,
@@ -48,44 +44,106 @@ def get_stock_status():
     }
 
 def get_department_consumption():
-    """Get consumption by department for the last 30 days"""
-    conn = get_db_connection()
+    """Get consumption by department for the last 30 days using MongoDB"""
+    db = MongoDBConnection()
+    transactions_collection = db.get_collection('inventory_transactions')
     
-    thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+    thirty_days_ago = datetime.now() - timedelta(days=30)
     
-    query = '''
-    SELECT d.name as department, SUM(t.quantity) as total_consumption
-    FROM inventory_transactions t
-    JOIN departments d ON t.to_department_id = d.id
-    WHERE t.transaction_type = 'issue'
-    AND t.transaction_date >= ?
-    GROUP BY t.to_department_id
-    ORDER BY total_consumption DESC
-    '''
+    # Aggregate consumption by department
+    pipeline = [
+        {
+            "$match": {
+                "transaction_type": "issue",
+                "transaction_date": {"$gte": thirty_days_ago}
+            }
+        },
+        {
+            "$group": {
+                "_id": "$to_department_id",
+                "total_consumption": {"$sum": "$quantity"}
+            }
+        },
+        {
+            "$lookup": {
+                "from": "departments",
+                "localField": "_id",
+                "foreignField": "_id",
+                "as": "department_info"
+            }
+        },
+        {
+            "$unwind": "$department_info"
+        },
+        {
+            "$project": {
+                "department": "$department_info.name",
+                "total_consumption": 1,
+                "_id": 0
+            }
+        },
+        {
+            "$sort": {"total_consumption": -1}
+        }
+    ]
     
-    consumption = pd.read_sql_query(query, conn, params=(thirty_days_ago,))
-    conn.close()
+    results = list(transactions_collection.aggregate(pipeline))
     
-    return consumption
+    if results:
+        return pd.DataFrame(results)
+    else:
+        return pd.DataFrame(columns=['department', 'total_consumption'])
 
 def get_top_consumed_items(limit=10):
-    """Get top consumed items for the last 30 days"""
-    conn = get_db_connection()
+    """Get top consumed items for the last 30 days using MongoDB"""
+    db = MongoDBConnection()
+    transactions_collection = db.get_collection('inventory_transactions')
     
-    thirty_days_ago = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
+    thirty_days_ago = datetime.now() - timedelta(days=30)
     
-    query = '''
-    SELECT i.name as item_name, SUM(t.quantity) as total_consumption
-    FROM inventory_transactions t
-    JOIN items i ON t.item_id = i.id
-    WHERE t.transaction_type = 'issue'
-    AND t.transaction_date >= ?
-    GROUP BY t.item_id
-    ORDER BY total_consumption DESC
-    LIMIT ?
-    '''
+    # Aggregate top consumed items
+    pipeline = [
+        {
+            "$match": {
+                "transaction_type": "issue",
+                "transaction_date": {"$gte": thirty_days_ago}
+            }
+        },
+        {
+            "$group": {
+                "_id": "$item_id",
+                "total_consumption": {"$sum": "$quantity"}
+            }
+        },
+        {
+            "$lookup": {
+                "from": "items",
+                "localField": "_id",
+                "foreignField": "_id",
+                "as": "item_info"
+            }
+        },
+        {
+            "$unwind": "$item_info"
+        },
+        {
+            "$project": {
+                "item_name": "$item_info.name",
+                "total_consumption": 1,
+                "_id": 0
+            }
+        },
+        {
+            "$sort": {"total_consumption": -1}
+        },
+        {
+            "$limit": limit
+        }
+    ]
     
-    top_items = pd.read_sql_query(query, conn, params=(thirty_days_ago, limit))
-    conn.close()
+    results = list(transactions_collection.aggregate(pipeline))
     
-    return top_items
+    if results:
+        return pd.DataFrame(results)
+    else:
+        return pd.DataFrame(columns=['item_name', 'total_consumption'])
