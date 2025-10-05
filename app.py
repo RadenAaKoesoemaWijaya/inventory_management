@@ -1,9 +1,22 @@
 import streamlit as st
 import pandas as pd
-from utils.auth import login_user, logout_user
-from utils.database import get_db_connection, get_items_low_stock, get_recent_transactions
+from utils.auth import login_user, logout_user, get_user_by_id, update_user
+from utils.database import MongoDBConnection, get_items_low_stock, get_recent_transactions, init_db
 from utils.helpers import get_stock_status, get_department_consumption, get_top_consumed_items
 import os
+from datetime import datetime
+from bson import ObjectId
+
+# Initialize MongoDB connection and database
+@st.cache_resource
+def initialize_database():
+    """Initialize database connection and create collections"""
+    try:
+        init_db()
+        return True
+    except Exception as e:
+        st.error(f"Failed to initialize database: {e}")
+        return False
 
 # Set page configuration
 st.set_page_config(
@@ -17,8 +30,11 @@ st.set_page_config(
 if 'authenticated' not in st.session_state:
     st.session_state['authenticated'] = False
 
+# Initialize database
+if 'db_initialized' not in st.session_state:
+    st.session_state['db_initialized'] = initialize_database()
+
 # Sidebar navigation
-# Updated sidebar navigation
 def sidebar_nav():
     st.sidebar.title("Navigasi KALKULIS")
     
@@ -38,7 +54,10 @@ def sidebar_nav():
             "Transfer Barang",
             "Laporan",
             "Forecasting",
-            "Profil Pengguna"
+            "Profil Pengguna",
+            "Notifikasi",
+            "Rekomendasi",
+            "Analytics"
         ]
         
         # Filter menu based on role
@@ -76,10 +95,9 @@ def login_page():
             password = st.text_input("Password", type="password", key="login_password")
             
             if st.button("Login"):
-                # In the login_page function
                 if login_user(username, password):
                     st.success("Login berhasil!")
-                    st.rerun()  # Fixed: using experimental_rerun instead of rerun
+                    st.rerun()
                 else:
                     st.error("Username atau password salah!")
     
@@ -233,24 +251,7 @@ def dashboard_page():
     else:
         st.info("Belum ada data konsumsi item.")
 
-# Main app
-# Wrapper functions for page modules
-def inventory_page():
-    from pages.inventory import app
-    app()
-
-def requests_page():
-    from pages.requests import app
-    app()
-
-def transfers_page():
-    from pages.transfers import app
-    app()
-
-# Add this function before the main() function
-# Add this import at the top with other imports
-import sqlite3
-
+# Profile page
 def profile_page():
     st.title("Profil Pengguna")
     
@@ -305,24 +306,22 @@ def profile_page():
         if submit_profile:
             if new_full_name != current_name or new_department != current_department:
                 try:
-                    conn = sqlite3.connect('data/inventory.db')
-                    cursor = conn.cursor()
+                    # Update user in MongoDB
+                    success = update_user(user_id, {
+                        "full_name": new_full_name,
+                        "department": new_department
+                    })
                     
-                    cursor.execute("""
-                        UPDATE users 
-                        SET full_name = ?, department = ? 
-                        WHERE id = ?
-                    """, (new_full_name, new_department, user_id))
-                    
-                    conn.commit()
-                    conn.close()
-                    
-                    # Update session state
-                    st.session_state['user']['full_name'] = new_full_name
-                    st.session_state['user']['department'] = new_department
-                    
-                    st.success("Profil berhasil diperbarui!")
-                    st.rerun()
+                    if success:
+                        # Update session state
+                        st.session_state['user']['full_name'] = new_full_name
+                        st.session_state['user']['department'] = new_department
+                        
+                        st.success("Profil berhasil diperbarui!")
+                        st.rerun()
+                    else:
+                        st.error("Gagal memperbarui profil")
+                        
                 except Exception as e:
                     st.error(f"Gagal update profil: {str(e)}")
             else:
@@ -349,36 +348,45 @@ def profile_page():
                 st.error("Password minimal 6 karakter!")
             else:
                 try:
-                    from utils.auth import verify_password
+                    from utils.auth import verify_password, hash_password
                     
-                    conn = sqlite3.connect('data/inventory.db')
-                    cursor = conn.cursor()
+                    # Get current user from database
+                    user_data = get_user_by_id(user_id)
+                    if not user_data:
+                        st.error("Pengguna tidak ditemukan")
+                        return
                     
                     # Verify current password
-                    cursor.execute("SELECT password FROM users WHERE id = ?", (user_id,))
-                    stored_hash = cursor.fetchone()[0]
-                    
-                    if verify_password(current_password, stored_hash):
+                    if verify_password(user_data['password'], current_password):
                         # Update password
-                        from utils.auth import hash_password
-                        new_hash = hash_password(new_password)
+                        hashed_new_password = hash_password(new_password)
                         
-                        cursor.execute("""
-                            UPDATE users 
-                            SET password = ? 
-                            WHERE id = ?
-                        """, (new_hash, user_id))
+                        success = update_user(user_id, {
+                            "password": hashed_new_password
+                        })
                         
-                        conn.commit()
-                        conn.close()
-                        
-                        st.success("Password berhasil diubah!")
+                        if success:
+                            st.success("Password berhasil diubah!")
+                        else:
+                            st.error("Gagal mengubah password")
                     else:
                         st.error("Password lama tidak sesuai!")
-                        conn.close()
                         
                 except Exception as e:
                     st.error(f"Gagal mengubah password: {str(e)}")
+
+# Wrapper functions for page modules
+def inventory_page():
+    from pages.inventory import app
+    app()
+
+def requests_page():
+    from pages.requests import app
+    app()
+
+def transfers_page():
+    from pages.transfers import app
+    app()
 
 def report_page():
     from pages.report import app
@@ -388,8 +396,13 @@ def forecast_page():
     from pages.forecast import app
     app()
 
-# Then use the wrapper functions in main
+# Main app function
 def main():
+    # Check if database is initialized
+    if not st.session_state.get('db_initialized', False):
+        st.error("Database initialization failed. Please check your MongoDB connection.")
+        return
+    
     if not st.session_state.get('authenticated', False):
         login_page()
     else:
@@ -405,6 +418,18 @@ def main():
             requests_page()
         elif page == "Transfer Barang":
             transfers_page()
+        elif page == "Notifikasi":
+            from utils.notifications import NotificationManager
+            manager = NotificationManager()
+            manager.display_notification_dashboard()
+        elif page == "Rekomendasi":
+            from utils.recommendations import InventoryRecommendation
+            recommender = InventoryRecommendation()
+            recommender.display_recommendation_dashboard()
+        elif page == "Analytics":
+            from utils.analytics import InventoryAnalytics
+            analytics = InventoryAnalytics()
+            analytics.display_analytics_dashboard()
         elif page == "Laporan":
             report_page()
         elif page == "Forecasting":
@@ -413,6 +438,19 @@ def main():
             if st.session_state['user']['role'] == 'admin':
                 st.title("Manajemen Pengguna")
                 st.write("Fitur manajemen pengguna akan segera tersedia...")
+                
+                # You can add user management functionality here
+                from utils.auth import get_all_users
+                
+                users = get_all_users()
+                if users:
+                    st.subheader("Daftar Pengguna")
+                    # Convert to DataFrame for better display
+                    import pandas as pd
+                    users_df = pd.DataFrame(users)
+                    st.dataframe(users_df[['username', 'full_name', 'role', 'department', 'is_active']])
+                else:
+                    st.info("Tidak ada pengguna ditemukan")
             else:
                 st.error("Anda tidak memiliki akses ke halaman ini!")
 
