@@ -96,8 +96,8 @@ def run_forecast():
     
     try:
         # Get all items with transaction history
-        items_collection = db.get_collection('items')
-        transactions_collection = db.get_collection('inventory_transactions')
+        items_collection = db['items']
+        transactions_collection = db['inventory_transactions']
         
         # Get all items
         items_data = list(items_collection.find({}))
@@ -121,7 +121,7 @@ def run_forecast():
             return
         
         # Get forecast collection
-        forecast_collection = db.get_collection('inventory_forecast')
+        forecast_collection = db['inventory_forecast']
         
         # Clear old forecast data
         forecast_collection.delete_many({})
