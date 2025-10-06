@@ -27,7 +27,7 @@ def receive_items():
     st.write("Gunakan form ini untuk mencatat penerimaan barang dari pemasok atau bagian pengadaan.")
     
     # Get items from database
-    db = MongoDBConnection.get_instance()
+    db = MongoDBConnection.get_database()
     items_collection = db.items
     items_data = list(items_collection.find().sort([("category", 1), ("name", 1)]))
     items = pd.DataFrame(items_data)
@@ -43,7 +43,7 @@ def receive_items():
         item_id = int(selected_item.split(" - ")[0])
         
         # Get item details
-        db = MongoDBConnection.get_instance()
+        db = MongoDBConnection.get_database()
         items_collection = db.items
         item_details = items_collection.find_one({"_id": ObjectId(item_id)})
         
@@ -78,7 +78,7 @@ def receive_items():
             if from_dept_id == to_dept_id:
                 st.error("Departemen asal dan tujuan tidak boleh sama!")
             else:
-                db = MongoDBConnection.get_instance()
+                db = MongoDBConnection.get_database()
                 items_collection = db.items
                 transactions_collection = db.inventory_transactions
                 
@@ -115,7 +115,7 @@ def distribute_items():
     st.write("Gunakan form ini untuk mencatat distribusi barang dari gudang ke unit-unit.")
     
     # Get items from database
-    db = MongoDBConnection.get_instance()
+    db = MongoDBConnection.get_database()
     items_collection = db.items
     items_data = list(items_collection.find({"current_stock": {"$gt": 0}}).sort([("category", 1), ("name", 1)]))
     items = pd.DataFrame(items_data)
@@ -132,7 +132,7 @@ def distribute_items():
         item_id = int(selected_item.split(" - ")[0])
         
         # Get item details
-        db = MongoDBConnection.get_instance()
+        db = MongoDBConnection.get_database()
         items_collection = db.items
         item_details = items_collection.find_one({"_id": ObjectId(item_id)})
         
@@ -170,7 +170,7 @@ def distribute_items():
                 if from_dept_id == to_dept_id:
                     st.error("Departemen asal dan tujuan tidak boleh sama!")
             else:
-                db = MongoDBConnection.get_instance()
+                db = MongoDBConnection.get_database()
                 items_collection = db.items
                 transactions_collection = db.inventory_transactions
                 
@@ -225,7 +225,7 @@ def transfer_history():
     
     with col2:
         # Department filter
-        db = MongoDBConnection.get_instance()
+        db = MongoDBConnection.get_database()
         departments_collection = db.departments
         departments_data = list(departments_collection.find().sort("name", 1))
         departments = pd.DataFrame(departments_data)
@@ -255,7 +255,7 @@ def transfer_history():
             end_date = date_range[0]
     
     # Build MongoDB aggregation pipeline
-    db = MongoDBConnection.get_instance()
+    db = MongoDBConnection.get_database()
     transactions_collection = db.inventory_transactions
     
     # Match stage with date range

@@ -31,7 +31,7 @@ def add_inventory_item():
         description = st.text_area("Deskripsi")
         
         # Get categories from database for dropdown
-        db = MongoDBConnection.get_db()
+        db = MongoDBConnection.get_database()
         categories = db.items.distinct("category")
         
         col1, col2 = st.columns(2)
@@ -55,7 +55,7 @@ def add_inventory_item():
                 st.error("Nama, kategori, dan satuan harus diisi!")
             else:
                 try:
-                    db = MongoDBConnection.get_db()
+                    db = MongoDBConnection.get_database()
                     
                     # Insert new item
                     item_data = {
@@ -100,7 +100,7 @@ def display_inventory():
     
     with col1:
         # Get categories from database
-        db = MongoDBConnection.get_db()
+        db = MongoDBConnection.get_database()
         categories = db.items.distinct("category")
         
         category_filter = st.selectbox(
@@ -118,7 +118,7 @@ def display_inventory():
         search_term = st.text_input("Cari Item", "")
     
     # Get inventory data
-    db = MongoDBConnection.get_db()
+    db = MongoDBConnection.get_database()
     query = {}
     
     # Apply filters
@@ -209,7 +209,7 @@ def manage_categories():
     st.subheader("Manajemen Kategori")
     
     # Get categories from database
-    db = MongoDBConnection.get_db()
+    db = MongoDBConnection.get_database()
     
     # Get category counts
     categories = list(db.items.aggregate([

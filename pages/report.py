@@ -41,7 +41,7 @@ def inventory_summary():
     st.subheader("Ringkasan Inventaris")
     
     # Get inventory data from MongoDB
-    db = MongoDBConnection.get_instance()
+    db = MongoDBConnection.get_database()
     items_collection = db.items
     
     # Get category summary using MongoDB aggregation
@@ -208,7 +208,7 @@ def consumption_analysis():
             start_date = end_date - timedelta(days=days)
     
     # Get consumption data from MongoDB
-    db = MongoDBConnection.get_instance()
+    db = MongoDBConnection.get_database()
     transactions_collection = db.inventory_transactions
     
     # Build match stage for date range and transaction type
@@ -369,7 +369,7 @@ def transaction_report():
     
     with col2:
         # Department filter
-        db = MongoDBConnection.get_instance()
+        db = MongoDBConnection.get_database()
         departments_collection = db.departments
         departments_data = list(departments_collection.find().sort("name", 1))
         departments = pd.DataFrame(departments_data)
@@ -399,7 +399,7 @@ def transaction_report():
             end_date = date_range[0]
     
     # Build MongoDB aggregation pipeline
-    db = MongoDBConnection.get_instance()
+    db = MongoDBConnection.get_database()
     transactions_collection = db.inventory_transactions
     
     # Match stage with date range

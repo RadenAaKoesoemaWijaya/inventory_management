@@ -33,7 +33,7 @@ def create_request():
         return
     
     # Get items from database
-    db = MongoDBConnection.get_instance()
+    db = MongoDBConnection.get_database()
     items_collection = db.items
     items_data = list(items_collection.find().sort([("category", 1), ("name", 1)]))
     items = pd.DataFrame(items_data)
@@ -50,7 +50,7 @@ def create_request():
         item_id = int(selected_item.split(" - ")[0])
         
         # Get item details
-        db = MongoDBConnection.get_instance()
+        db = MongoDBConnection.get_database()
         items_collection = db.items
         item_details = items_collection.find_one({"_id": ObjectId(item_id)})
         item = pd.Series(item_details) if item_details else pd.Series()
@@ -71,7 +71,7 @@ def create_request():
                 submit = st.form_submit_button("Kirim Permintaan")
                 
                 if submit:
-                    db = MongoDBConnection.get_instance()
+                    db = MongoDBConnection.get_database()
                     departments_collection = db.departments
                     requests_collection = db.item_requests
                     
@@ -110,7 +110,7 @@ def manage_requests():
         return
     
     # Get pending requests
-    db = MongoDBConnection.get_instance()
+    db = MongoDBConnection.get_database()
     requests_collection = db.item_requests
     items_collection = db.items
     departments_collection = db.departments
@@ -190,7 +190,7 @@ def manage_requests():
         st.info("Tidak ada permintaan yang menunggu persetujuan.")
 
 def process_request(request_id, status):
-    db = MongoDBConnection.get_instance()
+    db = MongoDBConnection.get_database()
     requests_collection = db.item_requests
     items_collection = db.items
     transactions_collection = db.inventory_transactions
@@ -280,7 +280,7 @@ def request_history():
     
     with col2:
         # Department filter
-        db = MongoDBConnection.get_instance()
+        db = MongoDBConnection.get_database()
         departments_collection = db.departments
         departments_data = list(departments_collection.find().sort("name", 1))
         departments = pd.DataFrame(departments_data)
@@ -371,7 +371,7 @@ def request_history():
     ]
     
     # Execute aggregation
-    db = MongoDBConnection.get_instance()
+    db = MongoDBConnection.get_database()
     requests_collection = db.item_requests
     requests_data = list(requests_collection.aggregate(pipeline))
     requests = pd.DataFrame(requests_data)

@@ -4,12 +4,14 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+import time
 from utils.auth import require_auth
 from utils.database import MongoDBConnection
 from utils.realtime import RealtimeDashboard, display_realtime_widget
-from utils.notifications import NotificationManager, display_notification_widget
+from utils.notifications import NotificationManager, display_notification_widget, display_realtime_notification_widget
 from utils.recommendations import InventoryRecommendation, display_recommendation_widget
 from utils.analytics import InventoryAnalytics, display_analytics_widget
+from utils.recommendations import InventoryRecommendation
 from utils.helpers import get_stock_status, get_department_consumption, get_top_consumed_items
 
 def app():
@@ -26,8 +28,71 @@ def app():
     # Display analytics widget
     display_analytics_widget()
     
-    # Add real-time section
+    # AI Recommendations widget
+    st.header("🤖 Rekomendasi AI")
+    
+    # Create columns for recommendations
+    col_rec1, col_rec2 = st.columns(2)
+    
+    with col_rec1:
+        # Quick recommendations
+        st.subheader("📊 Ringkasan Rekomendasi")
+        
+        # Get recommendation data
+        recommendation_engine = InventoryRecommendation()
+        reorder_recs = recommendation_engine.get_reorder_recommendations()
+        optimization_recs = recommendation_engine.get_optimization_recommendations()
+        
+        # Display metrics
+        if reorder_recs:
+            critical_reorder = len([r for r in reorder_recs if r['urgency'] == 'critical'])
+            st.metric("Item Kritis", critical_reorder, delta=None)
+        else:
+            st.metric("Item Kritis", 0)
+        
+        if optimization_recs:
+            reorder_opt = len([r for r in optimization_recs if r['recommendation_type'] == 'reorder'])
+            st.metric("Perlu Dipesan (AI)", reorder_opt, delta=None)
+        else:
+            st.metric("Perlu Dipesan (AI)", 0)
+        
+        # Link to full recommendations
+        if st.button("Lihat Semua Rekomendasi"):
+            st.switch_page("pages/recommendations.py")
+    
+    with col_rec2:
+        # Quick actions
+        st.subheader("⚡ Tindakan Cepat")
+        
+        if st.button("🔄 Refresh Semua Data"):
+            st.rerun()
+        
+        if st.button("📧 Kirim Laporan"):
+            st.info("Fitur laporan akan segera tersedia!")
+    
+    # Real-time notification widget
+    st.header("🚨 Notifikasi Real-time")
+    display_realtime_notification_widget()
+    
+    # Add real-time section with auto-refresh
     st.header("📊 Monitoring Real-time")
+    
+    # Auto-refresh configuration
+    if 'auto_refresh' not in st.session_state:
+        st.session_state.auto_refresh = True
+    
+    col_refresh1, col_refresh2 = st.columns([1, 4])
+    with col_refresh1:
+        auto_refresh = st.checkbox("Auto-refresh", value=st.session_state.auto_refresh)
+        st.session_state.auto_refresh = auto_refresh
+    
+    with col_refresh2:
+        if auto_refresh:
+            refresh_interval = st.slider("Interval refresh (detik)", 5, 60, 30)
+            if auto_refresh:
+                time.sleep(refresh_interval)
+                st.rerun()
+    
     realtime_dashboard = RealtimeDashboard()
     realtime_dashboard.run_realtime_updates()
     
@@ -79,7 +144,7 @@ def app():
         st.subheader("Item dengan Stok Rendah")
         
         # Get low stock items from MongoDB
-        db = MongoDBConnection.get_instance()
+        db = MongoDBConnection.get_database()
         items_collection = db.items
         
         low_stock_pipeline = [
@@ -165,7 +230,7 @@ def app():
     st.subheader("Transaksi Terbaru")
     
     # Get recent transactions from MongoDB
-    db = MongoDBConnection.get_instance()
+    db = MongoDBConnection.get_database()
     transactions_collection = db.inventory_transactions
     
     recent_pipeline = [
@@ -259,7 +324,7 @@ def app():
     st.subheader("Tren Konsumsi Bulanan")
     
     # Get monthly consumption data from MongoDB
-    db = MongoDBConnection.get_instance()
+    db = MongoDBConnection.get_database()
     transactions_collection = db.inventory_transactions
     
     # Calculate date 12 months ago

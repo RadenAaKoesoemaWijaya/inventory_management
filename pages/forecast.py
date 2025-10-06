@@ -13,13 +13,13 @@ def app():
     st.title("Prediksi Kebutuhan Inventaris")
     
     # Get forecast data
-    db = MongoDBConnection()
-    items_collection = db.get_collection('items')
+    db = MongoDBConnection.get_database()
+    items_collection = db['items']
     items_data = list(items_collection.find({}, {'_id': 1, 'name': 1, 'category': 1, 'current_stock': 1, 'min_stock': 1, 'unit': 1}).sort([('category', 1), ('name', 1)]))
     df = pd.DataFrame(items_data)
     
     # Check if forecast data exists
-    forecast_collection = db.get_collection('inventory_forecast')
+    forecast_collection = db['inventory_forecast']
     forecast_exists = forecast_collection.find_one() is not None
     
     if not forecast_exists:
@@ -44,7 +44,7 @@ def app():
         st.stop()
     
     # Get the latest forecast date
-    forecast_collection = db.get_collection('inventory_forecast')
+    forecast_collection = db['inventory_forecast']
     latest_forecast_doc = forecast_collection.find_one(sort=[('forecast_date', -1)])
     latest_forecast = latest_forecast_doc['forecast_date'] if latest_forecast_doc else None
     
@@ -77,8 +77,8 @@ def app():
                     st.info("Silakan cek koneksi database dan pastikan data transaksi tersedia.")
 
     # Get forecast data with MongoDB aggregation
-    forecast_collection = db.get_collection('inventory_forecast')
-    items_collection = db.get_collection('items')
+    forecast_collection = db['inventory_forecast']
+    items_collection = db['items']
     
     # Get latest forecast date
     latest_forecast_doc = forecast_collection.find_one(sort=[('forecast_date', -1)])
