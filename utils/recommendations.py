@@ -12,8 +12,8 @@ class InventoryRecommendation:
     def get_reorder_recommendations(self) -> List[Dict]:
         """Get items that need reordering based on consumption patterns"""
         try:
-            items_collection = self.db.get_collection('items')
-            transactions_collection = self.db.get_collection('inventory_transactions')
+            items_collection = self.db['items']
+            transactions_collection = self.db['inventory_transactions']
             
             recommendations = []
             
@@ -77,8 +77,8 @@ class InventoryRecommendation:
     def get_slow_moving_items(self) -> List[Dict]:
         """Identify slow-moving items that might be overstocked"""
         try:
-            items_collection = self.db.get_collection('items')
-            transactions_collection = self.db.get_collection('inventory_transactions')
+            items_collection = self.db['items']
+            transactions_collection = self.db['inventory_transactions']
             
             slow_moving = []
             
@@ -127,8 +127,8 @@ class InventoryRecommendation:
     def get_category_analysis(self) -> Dict:
         """Analyze inventory by category"""
         try:
-            items_collection = self.db.get_collection('items')
-            transactions_collection = self.db.get_collection('inventory_transactions')
+            items_collection = self.db['items']
+            transactions_collection = self.db['inventory_transactions']
             
             # Get all categories
             categories = items_collection.distinct('category')
@@ -183,20 +183,173 @@ class InventoryRecommendation:
         else:
             return 'low'
     
+    def get_demand_forecasting(self, item_id: str, days: int = 30) -> Dict:
+        """Predict future demand for an item using simple forecasting"""
+        try:
+            transactions_collection = self.db['inventory_transactions']
+            
+            # Get historical consumption data
+            cutoff_date = datetime.now() - timedelta(days=90)  # Last 90 days
+            
+            consumption_data = list(transactions_collection.find({
+                'item_id': item_id,
+                'transaction_type': 'issue',
+                'transaction_date': {'$gte': cutoff_date}
+            }).sort('transaction_date', 1))
+            
+            if not consumption_data:
+                return {'error': 'No historical data available'}
+            
+            # Calculate daily consumption
+            daily_consumption = {}
+            for trans in consumption_data:
+                date_key = trans['transaction_date'].date()
+                if date_key not in daily_consumption:
+                    daily_consumption[date_key] = 0
+                daily_consumption[date_key] += trans['quantity']
+            
+            # Calculate trend and seasonality (simple moving average)
+            consumption_values = list(daily_consumption.values())
+            
+            # Calculate 7-day moving average
+            if len(consumption_values) >= 7:
+                recent_avg = np.mean(consumption_values[-7:])
+                older_avg = np.mean(consumption_values[-14:-7]) if len(consumption_values) >= 14 else np.mean(consumption_values[:7])
+                trend = (recent_avg - older_avg) / older_avg if older_avg > 0 else 0
+            else:
+                recent_avg = np.mean(consumption_values)
+                trend = 0
+            
+            # Predict future demand
+            predicted_daily_demand = recent_avg * (1 + trend)
+            predicted_total_demand = predicted_daily_demand * days
+            
+            # Calculate confidence level based on data consistency
+            if len(consumption_values) > 1:
+                std_dev = np.std(consumption_values)
+                mean_consumption = np.mean(consumption_values)
+                coefficient_of_variation = std_dev / mean_consumption if mean_consumption > 0 else 1
+                confidence_level = max(0, 1 - coefficient_of_variation)
+            else:
+                confidence_level = 0.5
+            
+            return {
+                'predicted_daily_demand': predicted_daily_demand,
+                'predicted_total_demand': predicted_total_demand,
+                'trend': trend,
+                'confidence_level': confidence_level,
+                'historical_avg': recent_avg,
+                'data_points': len(consumption_data),
+                'forecast_period': days
+            }
+            
+        except Exception as e:
+            print(f"Error in demand forecasting: {e}")
+            return {'error': str(e)}
+    
+    def get_optimization_recommendations(self) -> List[Dict]:
+        """Get inventory optimization recommendations"""
+        try:
+            items_collection = self.db['items']
+            transactions_collection = self.db['inventory_transactions']
+            
+            recommendations = []
+            
+            # Get all items
+            items = list(items_collection.find({}))
+            
+            for item in items:
+                # Get demand forecast
+                forecast = self.get_demand_forecasting(str(item['_id']))
+                
+                if 'error' in forecast:
+                    continue
+                
+                predicted_daily_demand = forecast['predicted_daily_demand']
+                confidence_level = forecast['confidence_level']
+                
+                # Calculate optimal stock levels
+                if predicted_daily_demand > 0:
+                    # Economic Order Quantity (EOQ) - simplified
+                    annual_demand = predicted_daily_demand * 365
+                    ordering_cost = 50  # Assumed ordering cost
+                    holding_cost = 2    # Assumed holding cost per unit per year
+                    
+                    if holding_cost > 0:
+                        eoq = np.sqrt((2 * annual_demand * ordering_cost) / holding_cost)
+                    else:
+                        eoq = item['min_stock']
+                    
+                    # Safety stock (for 7 days + 50% buffer)
+                    safety_stock = predicted_daily_demand * 7 * 1.5
+                    
+                    # Reorder point
+                    lead_time_days = 7  # Assumed lead time
+                    reorder_point = (predicted_daily_demand * lead_time_days) + safety_stock
+                    
+                    # Current stock analysis
+                    current_stock = item['current_stock']
+                    min_stock = item['min_stock']
+                    
+                    # Determine if optimization is needed
+                    optimization_needed = False
+                    recommendation_type = ""
+                    reason = ""
+                    
+                    if current_stock < reorder_point:
+                        optimization_needed = True
+                        recommendation_type = "reorder"
+                        reason = f"Stok saat ini ({current_stock}) di bawah titik pesan ulang ({reorder_point:.0f})"
+                    elif current_stock > (reorder_point + eoq):
+                        optimization_needed = True
+                        recommendation_type = "reduce"
+                        reason = f"Stok berlebih. Consider reducing by {current_stock - (reorder_point + eoq):.0f} units"
+                    elif min_stock > safety_stock:
+                        optimization_needed = True
+                        recommendation_type = "adjust_min_stock"
+                        reason = f"Stok minimum dapat diturunkan dari {min_stock} ke {safety_stock:.0f}"
+                    
+                    if optimization_needed:
+                        recommendations.append({
+                            'item': item,
+                            'recommendation_type': recommendation_type,
+                            'reason': reason,
+                            'predicted_daily_demand': predicted_daily_demand,
+                            'confidence_level': confidence_level,
+                            'optimal_reorder_point': reorder_point,
+                            'economic_order_quantity': eoq,
+                            'safety_stock': safety_stock,
+                            'current_stock': current_stock,
+                            'current_min_stock': min_stock
+                        })
+            
+            # Sort by confidence level (highest first)
+            recommendations.sort(key=lambda x: x['confidence_level'], reverse=True)
+            
+            return recommendations
+            
+        except Exception as e:
+            print(f"Error getting optimization recommendations: {e}")
+            return []
+    
     def display_recommendation_dashboard(self):
         """Display recommendation dashboard"""
         st.header("🤖 Rekomendasi Inventory")
         
         # Create tabs for different types of recommendations
-        tab1, tab2, tab3, tab4 = st.tabs([
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
             "Rekomendasi Pemesanan", 
             "Item Lambat Bergerak", 
             "Analisis Kategori",
+            "Optimasi AI",
             "Ringkasan"
         ])
         
         with tab1:
             self.display_reorder_recommendations()
+        
+        with tab4:
+            self.display_optimization_recommendations()
         
         with tab2:
             self.display_slow_moving_items()
@@ -209,47 +362,144 @@ class InventoryRecommendation:
     
     def display_reorder_recommendations(self):
         """Display reorder recommendations"""
-        st.subheader("📦 Rekomendasi Pemesanan")
+        st.subheader("📦 Rekomendasi Pemesanan Ulang")
         
         recommendations = self.get_reorder_recommendations()
         
         if recommendations:
             # Display summary
+            critical_count = len([r for r in recommendations if r['urgency'] == 'critical'])
+            high_count = len([r for r in recommendations if r['urgency'] == 'high'])
+            
             col1, col2, col3 = st.columns(3)
             
             with col1:
-                critical_count = len([r for r in recommendations if r['urgency'] == 'critical'])
-                st.metric("Kritis (≤7 hari)", critical_count)
+                st.metric("Total Rekomendasi", len(recommendations))
             
             with col2:
-                high_count = len([r for r in recommendations if r['urgency'] == 'high'])
-                st.metric("Tinggi (8-14 hari)", high_count)
+                if critical_count > 0:
+                    st.metric("Kritis", critical_count, delta=None)
+                else:
+                    st.metric("Kritis", 0)
             
             with col3:
-                total_reorder_value = sum(r['recommended_quantity'] * r['item'].get('unit_price', 50) for r in recommendations)
-                st.metric("Estimasi Nilai Pemesanan", f"${total_reorder_value:,.0f}")
+                if high_count > 0:
+                    st.metric("Tinggi", high_count, delta=None)
+                else:
+                    st.metric("Tinggi", 0)
             
             # Display detailed recommendations
             st.subheader("Detail Rekomendasi")
             
             for rec in recommendations:
-                urgency_color = self._get_urgency_color(rec['urgency'])
+                item = rec['item']
+                urgency_color = {
+                    'critical': '🔴',
+                    'high': '🟠',
+                    'medium': '🟡',
+                    'low': '🟢'
+                }.get(rec['urgency'], '⚪')
                 
-                with st.expander(f"{urgency_color} {rec['item']['name']} - {rec['days_until_empty']:.0f} hari tersisa"):
+                with st.expander(f"{urgency_color} {item['name']} - {rec['days_until_empty']:.0f} hari tersisa"):
                     col1, col2 = st.columns(2)
                     
                     with col1:
-                        st.write(f"**Kategori:** {rec['item']['category']}")
-                        st.write(f"**Stok Saat Ini:** {rec['current_stock']} {rec['item']['unit']}")
-                        st.write(f"**Stok Minimum:** {rec['min_stock']} {rec['item']['unit']}")
-                        st.write(f"**Konsumsi Rata-rata:** {rec['avg_daily_consumption']:.1f} {rec['item']['unit']}/hari")
+                        st.write(f"**Kategori:** {item['category']}")
+                        st.write(f"**Stok Saat Ini:** {item['current_stock']} {item['unit']}")
+                        st.write(f"**Konsumsi Harian Rata-rata:** {rec['avg_daily_consumption']:.1f} {item['unit']}")
+                        st.write(f"**Stok Minimum:** {item['min_stock']} {item['unit']}")
                     
                     with col2:
-                        st.write(f"**Hari Habis:** {rec['days_until_empty']:.0f}")
-                        st.write(f"**Rekomendasi Jumlah:** {rec['recommended_quantity']} {rec['item']['unit']}")
-                        st.write(f"**Estimasi Biaya:** ${rec['recommended_quantity'] * rec['item'].get('unit_price', 50):,.0f}")
+                        st.write(f"**Hari Habis:** {rec['days_until_empty']:.0f} hari")
+                        st.write(f"**Rekomendasi Jumlah:** {rec['recommended_quantity']} {item['unit']}")
+                        st.write(f"**Tingkat Urgensi:** {rec['urgency'].title()}")
+                        
+                        # Calculate estimated cost (assuming $50 per unit)
+                        estimated_cost = rec['recommended_quantity'] * 50
+                        st.write(f"**Estimasi Biaya:** ${estimated_cost:,.0f}")
         else:
-            st.success("✅ Tidak ada item yang perlu dipesan saat ini")
+            st.success("✅ Tidak ada rekomendasi pemesanan saat ini")
+    
+    def display_optimization_recommendations(self):
+        """Display AI-powered optimization recommendations"""
+        st.subheader("🤖 Rekomendasi Optimasi AI")
+        st.info("Rekomendasi ini dihasilkan menggunakan analisis prediktif dan algoritma optimasi inventory")
+        
+        recommendations = self.get_optimization_recommendations()
+        
+        if recommendations:
+            # Display summary metrics
+            reorder_count = len([r for r in recommendations if r['recommendation_type'] == 'reorder'])
+            reduce_count = len([r for r in recommendations if r['recommendation_type'] == 'reduce'])
+            adjust_count = len([r for r in recommendations if r['recommendation_type'] == 'adjust_min_stock'])
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("Total Rekomendasi", len(recommendations))
+            
+            with col2:
+                if reorder_count > 0:
+                    st.metric("Perlu Dipesan", reorder_count, delta=None)
+                else:
+                    st.metric("Perlu Dipesan", 0)
+            
+            with col3:
+                if reduce_count > 0:
+                    st.metric("Perlu Dikurangi", reduce_count, delta=None)
+                else:
+                    st.metric("Perlu Dikurangi", 0)
+            
+            with col4:
+                if adjust_count > 0:
+                    st.metric("Sesuaikan Min Stock", adjust_count, delta=None)
+                else:
+                    st.metric("Sesuaikan Min Stock", 0)
+            
+            # Display detailed recommendations
+            st.subheader("Detail Rekomendasi Optimasi")
+            
+            for rec in recommendations:
+                item = rec['item']
+                confidence_pct = rec['confidence_level'] * 100
+                
+                # Color code based on recommendation type
+                if rec['recommendation_type'] == 'reorder':
+                    header_color = '🔴'
+                elif rec['recommendation_type'] == 'reduce':
+                    header_color = '🟠'
+                else:
+                    header_color = '🟡'
+                
+                with st.expander(f"{header_color} {item['name']} - Confidence: {confidence_pct:.0f}%"):
+                    col1, col2 = st.columns(2)
+                    
+                    with col1:
+                        st.write(f"**Kategori:** {item['category']}")
+                        st.write(f"**Stok Saat Ini:** {rec['current_stock']} {item['unit']}")
+                        st.write(f"**Permintaan Harian Prediksi:** {rec['predicted_daily_demand']:.1f} {item['unit']}")
+                        st.write(f"**Confidence Level:** {confidence_pct:.0f}%")
+                    
+                    with col2:
+                        st.write(f"**Rekomendasi:** {rec['recommendation_type'].replace('_', ' ').title()}")
+                        st.write(f"**Alasan:** {rec['reason']}")
+                        st.write(f"**Titik Pesan Ulang Optimal:** {rec['optimal_reorder_point']:.0f} {item['unit']}")
+                        st.write(f"**Kuantitas Order Ekonomis:** {rec['economic_order_quantity']:.0f} {item['unit']}")
+                    
+                    # Show demand forecast if available
+                    if 'predicted_daily_demand' in rec:
+                        with st.expander("📊 Detail Forecasting"):
+                            forecast = self.get_demand_forecasting(str(item['_id']))
+                            if 'error' not in forecast:
+                                col_f1, col_f2, col_f3 = st.columns(3)
+                                with col_f1:
+                                    st.metric("Trend", f"{forecast['trend']*100:.1f}%")
+                                with col_f2:
+                                    st.metric("Data Points", forecast['data_points'])
+                                with col_f3:
+                                    st.metric("Historical Avg", f"{forecast['historical_avg']:.1f}")
+        else:
+            st.success("✅ Tidak ada rekomendasi optimasi saat ini. Inventory Anda sudah optimal!")
     
     def display_slow_moving_items(self):
         """Display slow-moving items"""

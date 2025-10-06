@@ -29,7 +29,7 @@ class InventoryChangeStream:
         """Listen to MongoDB change streams"""
         try:
             # Watch for changes in inventory_transactions
-            with self.db.get_collection('inventory_transactions').watch() as stream:
+            with self.db.inventory_transactions.watch() as stream:
                 while self.running:
                     try:
                         change = stream.try_next()
@@ -58,8 +58,7 @@ class InventoryChangeStream:
         """Get current stock alerts"""
         try:
             # Find items with low stock
-            items_collection = self.db.get_collection('items')
-            low_stock_items = list(items_collection.find({
+            low_stock_items = list(self.db.items.find({
                 "$expr": {"$lte": ["$current_stock", "$min_stock"]}
             }).limit(10))
             
@@ -104,30 +103,27 @@ class RealtimeDashboard:
         st.subheader("📊 Transaksi Terkini")
         
         # Get recent transactions
-        transactions_collection = self.change_stream.db.get_collection('inventory_transactions')
-        items_collection = self.change_stream.db.get_collection('items')
-        users_collection = self.change_stream.db.get_collection('users')
-        departments_collection = self.change_stream.db.get_collection('departments')
+        db = self.change_stream.db
         
         # Get last 10 transactions with details
-        recent_transactions = list(transactions_collection.find().sort('created_at', -1).limit(10))
+        recent_transactions = list(db.inventory_transactions.find().sort('created_at', -1).limit(10))
         
         if recent_transactions:
             # Enrich transaction data
             enriched_transactions = []
             for trans in recent_transactions:
                 # Get item details
-                item = items_collection.find_one({'_id': trans['item_id']})
+                item = db.items.find_one({'_id': trans['item_id']})
                 item_name = item['name'] if item else "Unknown Item"
                 
                 # Get user details
-                user = users_collection.find_one({'_id': trans['created_by']})
+                user = db.users.find_one({'_id': trans['created_by']})
                 user_name = user['username'] if user else "Unknown User"
                 
                 # Get department details if available
                 dept_info = ""
                 if trans.get('to_department_id'):
-                    dept = departments_collection.find_one({'_id': trans['to_department_id']})
+                    dept = db.departments.find_one({'_id': trans['to_department_id']})
                     if dept:
                         dept_info = f" → {dept['name']}"
                 
@@ -154,23 +150,22 @@ class RealtimeDashboard:
         with col1:
             # Count today's transactions
             today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-            transactions_collection = self.change_stream.db.get_collection('inventory_transactions')
-            today_count = transactions_collection.count_documents({
+            db = self.change_stream.db
+            today_count = db.inventory_transactions.count_documents({
                 'created_at': {'$gte': today}
             })
             st.metric("Transaksi Hari Ini", today_count)
         
         with col2:
             # Count low stock items
-            items_collection = self.change_stream.db.get_collection('items')
-            low_stock_count = items_collection.count_documents({
+            low_stock_count = db.items.count_documents({
                 "$expr": {"$lte": ["$current_stock", "$min_stock"]}
             })
             st.metric("Item Stok Rendah", low_stock_count)
         
         with col3:
             # Count total items
-            total_items = items_collection.count_documents({})
+            total_items = db.items.count_documents({})
             st.metric("Total Item", total_items)
     
     def run_realtime_updates(self):

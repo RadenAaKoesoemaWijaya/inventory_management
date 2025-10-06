@@ -19,19 +19,18 @@ def format_date(date_str):
 
 def get_stock_status():
     """Get overall stock status summary using MongoDB"""
-    db = MongoDBConnection()
-    items_collection = db.get_collection('items')
+    db = MongoDBConnection.get_database()
     
     # Get total items count
-    total_items = items_collection.count_documents({})
+    total_items = db.items.count_documents({})
     
     # Get low stock items count
-    low_stock = items_collection.count_documents({
+    low_stock = db.items.count_documents({
         "$expr": {"$lte": ["$current_stock", "$min_stock"]}
     })
     
     # Get out of stock items count
-    out_of_stock = items_collection.count_documents({'current_stock': 0})
+    out_of_stock = db.items.count_documents({'current_stock': 0})
     
     # Get healthy stock items
     healthy_stock = total_items - low_stock
@@ -45,8 +44,7 @@ def get_stock_status():
 
 def get_department_consumption():
     """Get consumption by department for the last 30 days using MongoDB"""
-    db = MongoDBConnection()
-    transactions_collection = db.get_collection('inventory_transactions')
+    db = MongoDBConnection.get_database()
     
     thirty_days_ago = datetime.now() - timedelta(days=30)
     
@@ -87,7 +85,7 @@ def get_department_consumption():
         }
     ]
     
-    results = list(transactions_collection.aggregate(pipeline))
+    results = list(db.inventory_transactions.aggregate(pipeline))
     
     if results:
         return pd.DataFrame(results)
@@ -96,8 +94,7 @@ def get_department_consumption():
 
 def get_top_consumed_items(limit=10):
     """Get top consumed items for the last 30 days using MongoDB"""
-    db = MongoDBConnection()
-    transactions_collection = db.get_collection('inventory_transactions')
+    db = MongoDBConnection.get_database()
     
     thirty_days_ago = datetime.now() - timedelta(days=30)
     
@@ -141,7 +138,7 @@ def get_top_consumed_items(limit=10):
         }
     ]
     
-    results = list(transactions_collection.aggregate(pipeline))
+    results = list(db.inventory_transactions.aggregate(pipeline))
     
     if results:
         return pd.DataFrame(results)

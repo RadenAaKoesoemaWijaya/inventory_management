@@ -14,8 +14,8 @@ class InventoryAnalytics:
     def get_inventory_turnover(self, days: int = 30) -> Dict:
         """Calculate inventory turnover rate"""
         try:
-            items_collection = self.db.get_collection('items')
-            transactions_collection = self.db.get_collection('inventory_transactions')
+            items_collection = self.db['items']
+            transactions_collection = self.db['inventory_transactions']
             
             start_date = datetime.now() - timedelta(days=days)
             
@@ -63,8 +63,8 @@ class InventoryAnalytics:
     def get_stock_movement_analysis(self, days: int = 30) -> Dict:
         """Analyze stock movement patterns"""
         try:
-            transactions_collection = self.db.get_collection('inventory_transactions')
-            items_collection = self.db.get_collection('items')
+            transactions_collection = self.db['inventory_transactions']
+            items_collection = self.db['items']
             
             start_date = datetime.now() - timedelta(days=days)
             
@@ -124,8 +124,8 @@ class InventoryAnalytics:
     def get_department_efficiency_analysis(self, days: int = 30) -> Dict:
         """Analyze department consumption efficiency"""
         try:
-            departments_collection = self.db.get_collection('departments')
-            transactions_collection = self.db.get_collection('inventory_transactions')
+            departments_collection = self.db['departments']
+            transactions_collection = self.db['inventory_transactions']
             
             start_date = datetime.now() - timedelta(days=days)
             
@@ -175,8 +175,8 @@ class InventoryAnalytics:
     def get_inventory_health_score(self) -> Dict:
         """Calculate overall inventory health score"""
         try:
-            items_collection = self.db.get_collection('items')
-            transactions_collection = self.db.get_collection('inventory_transactions')
+            items_collection = self.db['items']
+            transactions_collection = self.db['inventory_transactions']
             
             # Get all items
             items = list(items_collection.find({}))
